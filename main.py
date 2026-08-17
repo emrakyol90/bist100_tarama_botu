@@ -42,7 +42,7 @@ def is_bist_holiday(dt_obj):
         return True
     
     # Türkiye resmi/dini tatil kontrolü
-    if dt_obj.date() in tr_holidays:
+    if dt_obj in tr_holidays:
         return True
         
     # Arife günleri yarım gün (13:00'da kapanır), 18:30 taraması için kapalı sayılır
@@ -54,6 +54,16 @@ def is_bist_holiday(dt_obj):
 
 def is_trade_day(dt_obj):
     return not is_bist_holiday(dt_obj)
+
+def is_last_trade_day_of_month(dt_obj):
+    if not is_trade_day(dt_obj):
+        return False
+    curr = dt_obj + timedelta(days=1)
+    while curr.month == dt_obj.month:
+        if is_trade_day(curr):
+            return False
+        curr += timedelta(days=1)
+    return True
 
 
 # ============================================================
@@ -266,10 +276,6 @@ def telegram_long(text):
             text[i:i + 3800]
         )
 
-
-# ============================================================
-# İŞ GÜNÜ / TATİL KONTROLÜ
-# ============================================================
 
 # ============================================================
 # BIST EVRENİ
@@ -1195,13 +1201,6 @@ def update_open_signals():
                 row["signal_time"]
             )
 
-            # Sinyalin üretildiği günün günlük mumunu
-            # sonuç hesabına dahil etmiyoruz.
-            #
-            # Böylece 18:30'da üretilen sinyal,
-            # o gün daha önce gerçekleşmiş TP/SL'yi
-            # yanlışlıkla kendi sonucu olarak almaz.
-
             df = get_history(
                 row["symbol"],
                 "10d",
@@ -1211,8 +1210,6 @@ def update_open_signals():
             if df.empty:
                 continue
 
-            # Tarih indexini timezone'suz hale getir
-            # karşılaştırmayı güvenli yap.
             try:
 
                 if df.index.tz is not None:
@@ -1243,8 +1240,6 @@ def update_open_signals():
 
             except Exception:
 
-                # Tarih filtrelemesi başarısız olursa
-                # yanlış sonuç üretmemek için geç.
                 continue
 
             if df.empty:
@@ -1369,10 +1364,6 @@ def generate_monthly_report(
         ""
     )
 
-    # --------------------------------------------------------
-    # Hiç sinyal yok
-    # --------------------------------------------------------
-
     if not signals:
 
         return (
@@ -1382,10 +1373,6 @@ def generate_monthly_report(
             f"━━━━━━━━━━━━━━━━━━\n\n"
             f"Bu ay için sinyal kaydı bulunamadı."
         )
-
-    # --------------------------------------------------------
-    # Genel sayılar
-    # --------------------------------------------------------
 
     total = len(signals)
 
@@ -1419,10 +1406,6 @@ def generate_monthly_report(
         if completed > 0
         else 0
     )
-
-    # --------------------------------------------------------
-    # Puan grupları
-    # --------------------------------------------------------
 
     score_lines = []
 
@@ -1481,10 +1464,6 @@ def generate_monthly_report(
             f"Başarı %{group_win:.1f}"
         )
 
-    # --------------------------------------------------------
-    # Açık pozisyon listesi
-    # --------------------------------------------------------
-
     open_lines = []
 
     for s in signals:
@@ -1500,8 +1479,6 @@ def generate_monthly_report(
             f"| Stop {s['stop']:.2f}"
         )
 
-    # Telegram mesajını çok şişirmemek için
-    # açık pozisyonların ilk 20 tanesini göster.
     if len(open_lines) > 20:
 
         open_lines = (
@@ -1512,10 +1489,6 @@ def generate_monthly_report(
                 f"açık sinyal daha var."
             ]
         )
-
-    # --------------------------------------------------------
-    # RAPOR
-    # --------------------------------------------------------
 
     lines = [
 
@@ -1598,18 +1571,10 @@ def check_monthly_report():
         ""
     )
 
-    # --------------------------------------------------------
-    # Sadece ayın son işlem günü
-    # --------------------------------------------------------
-
     if not is_last_trade_day_of_month(
         now_dt.date()
     ):
         return
-
-    # --------------------------------------------------------
-    # Aynı ay raporu ikinci kez gönderilmesin
-    # --------------------------------------------------------
 
     if last_reported == current_month:
         return
@@ -1621,12 +1586,6 @@ def check_monthly_report():
     success = telegram_send(
         report_text
     )
-
-    # Telegram gönderimi başarısızsa
-    # rapor gönderilmiş kabul edilmiyor.
-    #
-    # Böylece sonraki kontrol döngüsünde
-    # tekrar denenebilir.
 
     if success:
 
@@ -1661,13 +1620,10 @@ def scan_market():
 
     try:
 
-        # Önce açık sinyalleri kontrol et
         update_open_signals()
 
-        # BIST evreni
         symbols = get_all_symbols()
 
-        # Piyasa rejimi
         market = market_regime()
 
         candidates = []
@@ -1678,10 +1634,6 @@ def scan_market():
             f"Tarama başladı. "
             f"Evren: {len(symbols)}"
         )
-
-        # ----------------------------------------------------
-        # HİSSELERİ TARA
-        # ----------------------------------------------------
 
         for symbol in symbols:
 
@@ -1707,10 +1659,6 @@ def scan_market():
 
             time.sleep(0.05)
 
-        # ----------------------------------------------------
-        # SIRALA
-        # ----------------------------------------------------
-
         candidates.sort(
             key=lambda x: (
                 x["score"],
@@ -1720,19 +1668,11 @@ def scan_market():
             reverse=True
         )
 
-        # ----------------------------------------------------
-        # SİNYALLERİ KAYDET
-        # ----------------------------------------------------
-
         new_signals = sum(
             1
             for candidate in candidates
             if save_signal(candidate)
         )
-
-        # ----------------------------------------------------
-        # SCAN KAYDI
-        # ----------------------------------------------------
 
         now = datetime.now(TZ)
 
@@ -1764,10 +1704,6 @@ def scan_market():
         c.commit()
         c.close()
 
-        # ----------------------------------------------------
-        # GÜNLÜK TARAMA RAPORU
-        # ----------------------------------------------------
-
         telegram_long(
             scan_report(
                 candidates,
@@ -1776,10 +1712,6 @@ def scan_market():
                 scanned_ok
             )
         )
-
-        # ----------------------------------------------------
-        # AY SONU RAPORU
-        # ----------------------------------------------------
 
         check_monthly_report()
 
@@ -2029,10 +1961,6 @@ def scheduler():
                 )
             )
 
-            # ------------------------------------------------
-            # İŞ GÜNÜ + 18:30
-            # ------------------------------------------------
-
             if (
                 is_trade_day(today_date)
 
@@ -2076,6 +2004,8 @@ if __name__ == "__main__":
     log.info(
         "BIST Tarama Botu başlatılıyor..."
     )
+
+    telegram_send("🚀 BIST Tarama Botu başarıyla başlatıldı!")
 
     threading.Thread(
         target=scheduler,
