@@ -70,7 +70,7 @@ logging.basicConfig(
 
 log = logging.getLogger("BIST_BOT")
 
-app = Flask(_name_)
+app = Flask(__name__)
 scan_lock = threading.Lock()
 
 
