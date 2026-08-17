@@ -619,5 +619,6 @@ def manual_scan():
     threading.Thread(target=scan_market, daemon=True).start()
     return jsonify({"ok": True, "message": "Tarama başlatıldı."})
 
-if __name__ == "__main__":
+if __name__== "__main__":
+    start_bot_background_services()
     app.run(host="0.0.0.0", port=PORT, threaded=True)
