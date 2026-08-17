@@ -258,7 +258,7 @@ def get_all_symbols():
 
 
 def yahoo_symbol(symbol):
-    if symbol in ("^XU100", "^GSPC", "^IXIC"):
+    if symbol in ("^XU100", "XU100.IS", "^GSPC", "^IXIC"):
         return symbol
     return symbol if symbol.endswith(".IS") else symbol + ".IS"
 
@@ -368,7 +368,7 @@ def trade_plan(t):
     return {"entry": entry, "target": target, "stop": stop, "target_pct": target_pct, "rr": rr}
 
 def market_regime():
-    df = get_history("^XU100", "2y", "1d")
+    df = get_history("XU100.IS", "2y", "1d")
     if df.empty or len(df) < 200: 
         return {"value": None, "ema200": None, "regime": "BİLİNMİYOR"}
     e200 = ema(df["close"], 200)
@@ -598,10 +598,6 @@ def start_bot_background_services():
 def init_app():
     log.info("⚙️ Arka plan servisleri başlatılıyor...")
     threading.Thread(target=start_bot_background_services, daemon=True).start()
-
-# Flask uygulaması yüklendiğinde servisleri tetikle
-init_app()
-
 # ============================================================
 # FLASK
 # ============================================================
@@ -619,6 +615,6 @@ def manual_scan():
     threading.Thread(target=scan_market, daemon=True).start()
     return jsonify({"ok": True, "message": "Tarama başlatıldı."})
 
-if __name__== "__main__":
+if __name__ == "__main__":
     start_bot_background_services()
     app.run(host="0.0.0.0", port=PORT, threaded=True)
