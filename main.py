@@ -198,22 +198,62 @@ def normalize_symbol(s):
     return s if s else None
 
 def get_all_symbols():
+    """
+    BIST'teki tüm hisseleri otomatik çeker.
+    Tek bir kaynağa bağımlı kalmaz; sırasıyla İş Yatırım, TradingView ve KAP/GitHub listesini dener.
+    """
     env = os.getenv("BIST_SYMBOLS", "").strip()
     if env:
         return sorted(set(normalize_symbol(x) for x in env.split(",") if normalize_symbol(x)))
 
+    symbols = set()
+
+    # 1. DENEME: İş Yatırım
     try:
-        url = "https://www.isyatirim.com.tr/_layouts/15/IsYatirim.MusteriKanalı/CommonData.aspx/GetHisseList"
-        r = requests.get(url, headers={"User-Agent": "Mozilla/5.0"}, timeout=15)
+        url = "https://www.isyatirim.com.tr/_layouts/15/IsYatirim.MusteriKanali/CommonData.aspx/GetHisseList"
+        r = requests.get(url, headers={"User-Agent": "Mozilla/5.0"}, timeout=10)
         if r.ok:
             data = r.json()
-            symbols = [item["code"] for item in data if "code" in item and item["code"]]
-            if len(symbols) >= 300:
-                log.info(f"BIST evreni çekildi: {len(symbols)} hisse.")
-                return sorted(set(symbols))
+            fetched = [item["code"] for item in data if "code" in item and item["code"]]
+            if len(fetched) >= 300:
+                log.info(f"✅ İş Yatırım üzerinden {len(fetched)} hisse otomatik çekildi.")
+                return sorted(set(fetched))
     except Exception as e:
-        log.warning(f"İş Yatırım sembol listesi alınamadı, yedeğe geçiliyor: {e}")
+        log.warning(f"⚠️ İş Yatırım dinamik liste çekilemedi: {e}")
 
+    # 2. DENEME: TradingView BIST Taraması (Çok Hızlı ve Günceldir)
+    try:
+        tv_url = "https://scanner.tradingview.com/turkey/scan"
+        payload = {
+            "filter": [{"left": "type", "operation": "in_range", "right": ["stock", "dr", "fund"]}],
+            "symbols": {"query": {"types": []}},
+            "columns": ["name"],
+            "range": [0, 1000]
+        }
+        r = requests.post(tv_url, json=payload, headers={"User-Agent": "Mozilla/5.0"}, timeout=10)
+        if r.ok:
+            data = r.json().get("data", [])
+            fetched = [item["s"].split(":")[-1] for item in data if "s" in item]
+            if len(fetched) >= 300:
+                log.info(f"✅ TradingView üzerinden {len(fetched)} hisse otomatik çekildi.")
+                return sorted(set(fetched))
+    except Exception as e:
+        log.warning(f"⚠️ TradingView üzerinden liste çekilemedi: {e}")
+
+    # 3. DENEME: GitHub Güncel BIST 500+ Liste Yedeği
+    try:
+        github_url = "https://raw.githubusercontent.com/datasets/top-turkish-stocks/main/bist_all.json"
+        r = requests.get(github_url, timeout=10)
+        if r.ok:
+            fetched = r.json()
+            if len(fetched) >= 300:
+                log.info(f"✅ Güncel Açık Kaynak Liste üzerinden {len(fetched)} hisse çekildi.")
+                return sorted(set(fetched))
+    except Exception as e:
+        log.warning(f"⚠️ Açık kaynak yedek listeden çekilemedi: {e}")
+
+    # Son Çare: Yine de bir şey gelmezse bot durmasın diye fallback
+    log.error("❌ Otomatik listelerin hiçbiri çekilemedi, acil durum yedeği kullanılıyor!")
     return sorted(set(FALLBACK_SYMBOLS))
 
 
@@ -329,10 +369,12 @@ def trade_plan(t):
 
 def market_regime():
     df = get_history("^XU100", "2y", "1d")
-    if df.empty or len(df) < 200: return {"value": None, "ema200": None, "regime": "BİLİNMİYOR"}
+    if df.empty or len(df) < 200: 
+        return {"value": None, "ema200": None, "regime": "BİLİNMİYOR"}
     e200 = ema(df["close"], 200)
     v, ev = float(df["close"].iloc[-1]), float(e200.iloc[-1])
-    return {"value": v, "ema200": ev, "regime": "YÜKSELİŞ" if v > ev else "DÜŞÜŞ"}
+    regime_str = "YÜKSELİŞ 📈 (EMA200 Üstünde)" if v > ev else "DÜŞÜŞ 📉 (EMA200 Altında)"
+    return {"value": v, "ema200": ev, "regime": regime_str}
 
 def month_key(dt=None):
     if dt is None: dt = datetime.now(TZ)
@@ -370,13 +412,29 @@ def save_signal(x):
 def generate_monthly_report(current_m_key=None):
     if not current_m_key: current_m_key = month_key()
     c = get_db()
+    
+    # Bot çalışma süresi hesaplama
+    start_time_str = c.execute("SELECT value FROM meta WHERE key='start_time'").fetchone()
+    if start_time_str and start_time_str["value"]:
+        start_dt = datetime.fromisoformat(start_time_str["value"])
+        uptime_days = (datetime.now(TZ) - start_dt).days
+        uptime_text = f"{uptime_days} Gün"
+    else:
+        uptime_text = "Bilinmiyor"
+
+    # Güncel BIST 100 ve Rejim bilgisi
+    m_reg = market_regime()
+    xu100_val = f"{m_reg['value']:.2f}" if m_reg['value'] else "Alınamadı"
+    regime_text = m_reg['regime']
+
     signals = c.execute("SELECT * FROM signals WHERE month_key=? ORDER BY signal_time ASC", (current_m_key,)).fetchall()
     c.close()
+    
     now = datetime.now(TZ)
     m_name = MONTHS.get(now.month, "")
 
     if not signals:
-        return f"📊 BIST BOTU - {m_name.upper()} {now.year} GÜNCEL RAPORU\n━━━━━━━━━━━━━━━━━━\n\nBu ay için henüz kayıtlı sinyal bulunmuyor."
+        return f"📊 BIST BOTU - {m_name.upper()} {now.year} GÜNCEL RAPORU\n━━━━━━━━━━━━━━━━━━\n⏱️ Bot Çalışma Süresi: {uptime_text}\n📈 BIST 100 Endeks: {xu100_val}\n🚦 Piyasa Trendi: {regime_text}\n━━━━━━━━━━━━━━━━━━\n\nBu ay için henüz kayıtlı sinyal bulunmuyor."
 
     total = len(signals)
     target_cnt = sum(1 for s in signals if s["status"] == "TARGET")
@@ -388,11 +446,14 @@ def generate_monthly_report(current_m_key=None):
     lines = [
         f"📊 BIST BOTU - {m_name.upper()} {now.year} GÜNCEL RAPORU",
         "━━━━━━━━━━━━━━━━━━",
+        f"⏱️ Bot Çalışma Süresi: {uptime_text}",
+        f"📈 BIST 100 Endeks: {xu100_val}",
+        f"🚦 Piyasa Trendi: {regime_text}",
+        "━━━━━━━━━━━━━━━━━━",
         f"🎯 Toplam Sinyal: {total} | ✅ Hedef: {target_cnt} | 🛑 Stop: {stop_cnt} | ⏳ Açık: {open_cnt}",
         f"🏆 Başarı Oranı: %{win_rate:.1f}\n"
     ]
     return "\n".join(lines)
-
 
 def scan_market(chat_id=None):
     if not scan_lock.acquire(blocking=False):
@@ -498,15 +559,23 @@ def scheduler():
         try:
             now = datetime.now(TZ)
             today_str = now.strftime("%Y-%m-%d")
+            
+            # 1. HER İŞ GÜNÜ SAAT 18:30'DA OTOMATİK TARAMA
             if (is_trade_day(now.date()) and now.hour == SCAN_HOUR and now.minute == SCAN_MINUTE and last_scan_date != today_str):
                 last_scan_date = today_str
                 log.info(f"⏰ Otomatik tarama tetiklendi: {today_str}")
                 threading.Thread(target=scan_market, daemon=True).start()
+                
+                # 2. EĞER BUGÜN AYIN SON İŞ GÜNÜYSE TRAMADAN SONRA AYLIK RAPORU OTOMATİK AT
+                if is_last_trade_day_of_month(now.date()):
+                    log.info("📊 Ayın son işlem günü! Otomatik aylık rapor gönderiliyor...")
+                    rep = generate_monthly_report()
+                    telegram_send(f"🚨 *AY SONU KAPANIŞ RAPORU* 🚨\n\n{rep}")
+
             time.sleep(20)
         except Exception as e:
             log.error(f"Scheduler hatası: {e}")
             time.sleep(30)
-
 
 # ============================================================
 # BAŞLANGIÇ SERVİSLERİ
