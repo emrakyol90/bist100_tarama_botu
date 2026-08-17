@@ -525,9 +525,13 @@ def start_bot_background_services():
     threading.Thread(target=telegram_poll_loop, daemon=True).start()
     threading.Thread(target=keep_alive, daemon=True).start()
 
-# Sunucu başlangıcında çalıştır
-start_bot_background_services()
+# Sunucu başlangıcında arka plan servislerini bağımsız çalıştır
+def init_app():
+    log.info("⚙️ Arka plan servisleri başlatılıyor...")
+    threading.Thread(target=start_bot_background_services, daemon=True).start()
 
+# Flask uygulaması yüklendiğinde servisleri tetikle
+init_app()
 
 # ============================================================
 # FLASK
