@@ -368,13 +368,36 @@ def trade_plan(t):
     return {"entry": entry, "target": target, "stop": stop, "target_pct": target_pct, "rr": rr}
 
 def market_regime():
-    df = get_history("XU100.IS", "2y", "1d")
-    if df.empty or len(df) < 200: 
+    try:
+        import requests
+        import pandas as pd
+        
+        headers = {'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64)'}
+        url = "https://query1.finance.yahoo.com/v8/finance/chart/XU100.IS?range=1y&interval=1d"
+        
+        res = requests.get(url, headers=headers, timeout=10)
+        data = res.json()
+        
+        prices = data['chart']['result'][0]['indicators']['quote'][0]['close']
+        clean_prices = [p for p in prices if p is not None]
+        
+        if not clean_prices:
+            return {"value": None, "ema200": None, "regime": "BİLİNMİYOR"}
+            
+        v = round(clean_prices[-1], 2)
+        
+        if len(clean_prices) >= 200:
+            s = pd.Series(clean_prices)
+            ev = round(s.ewm(span=200, adjust=False).mean().iloc[-1], 2)
+        else:
+            ev = v
+            
+        regime_str = "YÜKSELİŞ 📈 (EMA200 Üstünde)" if v > ev else "DÜŞÜŞ 📉 (EMA200 Altında)"
+        return {"value": v, "ema200": ev, "regime": regime_str}
+        
+    except Exception as e:
+        log.error(f"Market rejim hatası: {e}")
         return {"value": None, "ema200": None, "regime": "BİLİNMİYOR"}
-    e200 = ema(df["close"], 200)
-    v, ev = float(df["close"].iloc[-1]), float(e200.iloc[-1])
-    regime_str = "YÜKSELİŞ 📈 (EMA200 Üstünde)" if v > ev else "DÜŞÜŞ 📉 (EMA200 Altında)"
-    return {"value": v, "ema200": ev, "regime": regime_str}
 
 def month_key(dt=None):
     if dt is None: dt = datetime.now(TZ)
@@ -617,4 +640,4 @@ def manual_scan():
 
 if __name__ == "__main__":
     start_bot_background_services()
-    app.run(host="0.0.0.0", port=PORT, threaded=True)
+    app.run(host="0.0.0.0", port=PORT, use_reloader=False)
