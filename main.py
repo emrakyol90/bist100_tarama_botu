@@ -743,12 +743,13 @@ def start_bot_background_services():
     threading.Thread(target=keep_alive, daemon=True).start()
     threading.Thread(target=track_open_signals, daemon=True).start()
 
-# Arka plan servislerini tek sefer doğrudan çalıştır
-start_bot_background_services()
-
 # ============================================================
 # FLASK
 # ============================================================
+
+@app.before_request
+def initialize_once():
+    start_bot_background_services()
 
 @app.get("/")
 def home():
@@ -764,4 +765,5 @@ def manual_scan():
     return jsonify({"ok": True, "message": "Tarama başlatıldı."})
 
 if __name__ == "__main__":
+    start_bot_background_services()
     app.run(host="0.0.0.0", port=PORT, use_reloader=False)
