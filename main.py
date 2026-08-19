@@ -44,8 +44,8 @@ TELEGRAM_CHAT_ID = os.getenv("TELEGRAM_CHAT_ID", "").strip()
 SCAN_HOUR = 18
 SCAN_MINUTE = 30
 
-MIN_TARGET_PCT = 10.0
-MIN_RR = 2.0
+MIN_TARGET_PCT = 6.0
+MIN_RR = 1.5
 
 
 # Türkiye resmi ve dini tatilleri
@@ -85,7 +85,7 @@ scan_lock = threading.Lock()
 MONTHS = {
     1: "Ocak", 2: "Şubat", 3: "Mart", 4: "Nisan",
     5: "Mayıs", 6: "Haziran", 7: "Temmuz", 8: "Ağustos",
-    9: "Eylül", 10: "Ekim", 11: "Kasım", 12: "Aralık"
+    9: "Eylul", 10: "Ekim", 11: "Kasım", 12: "Aralık"
 }
 
 
@@ -208,8 +208,7 @@ def get_all_symbols():
         url = "https://www.isyatirim.com.tr/_layouts/15/IsYatirim.MusteriKanali/CommonData.aspx/GetHisseList"
         r = requests.get(url, headers={"User-Agent": "Mozilla/5.0"}, timeout=10)
         if r.ok:
-            data = r.json()
-            fetched = [item["code"] for item in data if "code" in item and item["code"]]
+            fetched = [item["code"] for item in r.json() if "code" in item and item["code"]]
             if len(fetched) >= 300:
                 log.info(f"✅ İş Yatırım üzerinden {len(fetched)} hisse otomatik çekildi.")
                 return sorted(set(fetched))
@@ -235,21 +234,20 @@ def get_all_symbols():
     except Exception as e:
         log.warning(f"⚠️ TradingView üzerinden liste çekilemedi: {e}")
 
-    # 3. DENEME: GitHub Güncel BIST Listesi
+    # 3. DENEME: Güncel Açık Kaynak JSON
     try:
-        github_url = "https://raw.githubusercontent.com/datasets/top-turkish-stocks/main/bist_all.json"
-        r = requests.get(github_url, timeout=10)
+        gh_url = "https://raw.githubusercontent.com/fawazahmed0/currency-api/1/bist.json"
+        r = requests.get(gh_url, timeout=10)
         if r.ok:
             fetched = r.json()
-            if len(fetched) >= 300:
-                log.info(f"✅ Güncel Açık Kaynak Liste üzerinden {len(fetched)} hisse çekildi.")
+            if isinstance(fetched, list) and len(fetched) >= 300:
+                log.info(f"✅ Açık kaynak yedek listeden {len(fetched)} hisse çekildi.")
                 return sorted(set(fetched))
     except Exception as e:
         log.warning(f"⚠️ Açık kaynak yedek listeden çekilemedi: {e}")
 
     log.error("❌ Otomatik listelerin hiçbiri çekilemedi, acil durum yedeği kullanılıyor!")
     return sorted(set(FALLBACK_SYMBOLS))
-
 
 def yahoo_symbol(symbol):
     if symbol in ("^XU100", "XU100.IS", "^GSPC", "^IXIC"):
@@ -313,12 +311,23 @@ def technical_analysis(daily, four_hour):
     d["ema20"], d["ema50"], d["ema200"], d["atr"] = ema(d["close"], 20), ema(d["close"], 50), ema(d["close"], 200), atr(d)
     h["wt1"], h["wt2"] = wavetrend(h)
 
-    a, old, x, p = d.iloc[-1], d.iloc[-11], h.iloc[-1], h.iloc[-2]
-    wt_signal = (x["wt1"] < 0 and x["wt2"] < 0) and (p["wt1"] <= p["wt2"] and x["wt1"] > x["wt2"]) and (x["wt1"] > p["wt1"]) and (x["close"] >= x["open"])
-    
-    score = ((20 if a["close"] > a["ema200"] else 0) + (10 if a["ema200"] > old["ema200"] else 0) +
-             (10 if a["ema20"] > a["ema50"] else 0) + (15 if wt_signal else 0) + 
-             (5 if a["volume"] >= d["volume"].rolling(20).mean().iloc[-1] * 0.80 else 0))
+    a, old = d.iloc[-1], d.iloc[-11]
+
+    # Son 6 mum (gün içindeki 24 saat) kontrolü
+    wt_signal = False
+    lookback = min(6, len(h) - 1)
+    for i in range(1, lookback + 1):
+        x_candle = h.iloc[-i]
+        p_candle = h.iloc[-i-1]
+        if (x_candle["wt1"] < 20 and x_candle["wt2"] < 20) and (p_candle["wt1"] <= p_candle["wt2"] and x_candle["wt1"] > x_candle["wt2"]) and (x_candle["close"] >= x_candle["open"]):
+            wt_signal = True
+            break
+
+    score = ((20 if a["close"] > a["ema200"] else 0) + 
+             (10 if a["ema200"] > old["ema200"] else 0) +
+             (10 if a["ema20"] > a["ema50"] else 0) + 
+             (20 if wt_signal else 0) + 
+             (10 if a["volume"] >= d["volume"].rolling(20).mean().iloc[-1] * 0.80 else 0))
 
     return {"technical_score": int(score), "close": float(a["close"]), "ema200": float(a["ema200"]), "atr": float(a["atr"]), "wt_signal": bool(wt_signal)}
 
@@ -331,9 +340,19 @@ def fundamental_score(symbol):
             timeout=4
         )
         if not r.ok or not r.json().get("d"): return 0
-        metrics = {item["KOD"]: float(str(item["DEGER"]).replace(",", ".")) for item in r.json()["d"] if "KOD" in item and item.get("DEGER") is not None}
         
-        roe, p_growth, r_growth, d_eq, op_m, pe, pb = metrics.get("ROE"), metrics.get("NET_KAR_BUYUME"), metrics.get("SATIS_BUYUME"), metrics.get("BORC_OZSERMAYE"), metrics.get("FAALIYET_MARJI"), metrics.get("FK"), metrics.get("PDDD")
+        metrics = {}
+        for item in r.json()["d"]:
+            if "KOD" in item and item.get("DEGER") is not None:
+                try:
+                    metrics[item["KOD"]] = float(str(item["DEGER"]).replace(",", "."))
+                except ValueError:
+                    continue
+        
+        roe, p_growth, r_growth, d_eq, op_m, pe, pb = (
+            metrics.get("ROE"), metrics.get("NET_KAR_BUYUME"), metrics.get("SATIS_BUYUME"), 
+            metrics.get("BORC_OZSERMAYE"), metrics.get("FAALIYET_MARJI"), metrics.get("FK"), metrics.get("PDDD")
+        )
         score = 0
         if roe is not None: score += (8 if roe >= 20 else 5 if roe >= 10 else 0)
         if p_growth is not None: score += (8 if p_growth >= 20 else 5 if p_growth > 0 else 0)
@@ -343,16 +362,12 @@ def fundamental_score(symbol):
         if pe is not None: score += (4 if 0 < pe <= 20 else 2 if pe <= 35 else 0)
         if pb is not None: score += (3 if 0 < pb <= 3 else 1 if pb <= 6 else 0)
         return score
-    except Exception: return 0
+    except Exception: 
+        return 0
 
 def final_score(tech, fund):
-    tot = tech + fund
-    if tech < 45: return 0
-    if tot >= 90 and tech >= 50 and fund >= 32: return 100
-    if tot >= 82 and tech >= 48 and fund >= 28: return 90
-    if tot >= 72 and tech >= 45 and fund >= 24: return 80
-    if tot >= 60 and tech >= 45 and fund >= 18: return 60
-    return 0
+    if tech < 40: return 0
+    return tech + fund
 
 def trade_plan(t):
     entry = t["close"]
@@ -362,7 +377,10 @@ def trade_plan(t):
     target = max(entry * (1 + MIN_TARGET_PCT / 100.0), entry + r_dist * MIN_RR)
     target_pct = (target / entry - 1) * 100
     rr = (target - entry) / r_dist
-    if target_pct < MIN_TARGET_PCT or rr < MIN_RR: return None
+
+    if target_pct < MIN_TARGET_PCT or rr < MIN_RR: 
+        return None
+
     return {"entry": entry, "target": target, "stop": stop, "target_pct": target_pct, "rr": rr}
 
 def market_regime():
@@ -580,8 +598,8 @@ def track_open_signals():
                 y_sym = yahoo_symbol(sym)
 
                 try:
-                    if len(symbols_list) > 1:
-                        df = data[y_sym].dropna() if y_sym in data else pd.DataFrame()
+                    if isinstance(data.columns, pd.MultiIndex) and y_sym in data.columns.get_level_values(0):
+                        df = data[y_sym].dropna()
                     else:
                         df = data.dropna()
 
@@ -763,6 +781,7 @@ def manual_scan():
     threading.Thread(target=scan_market, daemon=True).start()
     return jsonify({"ok": True, "message": "Tarama başlatıldı."})
 
+start_bot_background_services()
+
 if __name__ == "__main__":
-    start_bot_background_services()
     app.run(host="0.0.0.0", port=PORT, use_reloader=False)
