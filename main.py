@@ -85,7 +85,7 @@ scan_lock = threading.Lock()
 MONTHS = {
     1: "Ocak", 2: "Şubat", 3: "Mart", 4: "Nisan",
     5: "Mayıs", 6: "Haziran", 7: "Temmuz", 8: "Ağustos",
-    9: "Eylul", 10: "Ekim", 11: "Kasım", 12: "Aralık"
+    9: "Eylül", 10: "Ekim", 11: "Kasım", 12: "Aralık"
 }
 
 
@@ -151,7 +151,7 @@ init_db()
 
 
 # ============================================================
-# TELEGRAM SERVICE (DETAYLI LOGLAMALI)
+# TELEGRAM SERVICE
 # ============================================================
 
 def telegram_send(text, chat_id=None):
@@ -199,15 +199,9 @@ def normalize_symbol(s):
     return s if s else None
 
 def get_all_symbols():
-    """
-    BIST'teki tüm hisseleri otomatik çeker.
-    Tek bir kaynağa bağımlı kalmaz; sırasıyla İş Yatırım, TradingView ve KAP/GitHub listesini dener.
-    """
     env = os.getenv("BIST_SYMBOLS", "").strip()
     if env:
         return sorted(set(normalize_symbol(x) for x in env.split(",") if normalize_symbol(x)))
-
-    symbols = set()
 
     # 1. DENEME: İş Yatırım
     try:
@@ -222,7 +216,7 @@ def get_all_symbols():
     except Exception as e:
         log.warning(f"⚠️ İş Yatırım dinamik liste çekilemedi: {e}")
 
-    # 2. DENEME: TradingView BIST Taraması (Çok Hızlı ve Günceldir)
+    # 2. DENEME: TradingView BIST Taraması
     try:
         tv_url = "https://scanner.tradingview.com/turkey/scan"
         payload = {
@@ -241,7 +235,7 @@ def get_all_symbols():
     except Exception as e:
         log.warning(f"⚠️ TradingView üzerinden liste çekilemedi: {e}")
 
-    # 3. DENEME: GitHub Güncel BIST 500+ Liste Yedeği
+    # 3. DENEME: GitHub Güncel BIST Listesi
     try:
         github_url = "https://raw.githubusercontent.com/datasets/top-turkish-stocks/main/bist_all.json"
         r = requests.get(github_url, timeout=10)
@@ -253,7 +247,6 @@ def get_all_symbols():
     except Exception as e:
         log.warning(f"⚠️ Açık kaynak yedek listeden çekilemedi: {e}")
 
-    # Son Çare: Yine de bir şey gelmezse bot durmasın diye fallback
     log.error("❌ Otomatik listelerin hiçbiri çekilemedi, acil durum yedeği kullanılıyor!")
     return sorted(set(FALLBACK_SYMBOLS))
 
@@ -332,7 +325,11 @@ def technical_analysis(daily, four_hour):
 def fundamental_score(symbol):
     try:
         url = f"https://www.isyatirim.com.tr/_layouts/15/IsYatirim.MaliTablolar/MaliTablo.aspx/GetOranlar?hisse={symbol}"
-        r = requests.get(url, headers={"User-Agent": "Mozilla/5.0", "X-Requested-With": "XMLHttpRequest"}, timeout=10)
+        r = requests.get(
+            url, 
+            headers={"User-Agent": "Mozilla/5.0", "X-Requested-With": "XMLHttpRequest", "Connection": "close"}, 
+            timeout=4
+        )
         if not r.ok or not r.json().get("d"): return 0
         metrics = {item["KOD"]: float(str(item["DEGER"]).replace(",", ".")) for item in r.json()["d"] if "KOD" in item and item.get("DEGER") is not None}
         
@@ -370,9 +367,6 @@ def trade_plan(t):
 
 def market_regime():
     try:
-        import requests
-        import pandas as pd
-        
         headers = {'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64)'}
         url = "https://query1.finance.yahoo.com/v8/finance/chart/XU100.IS?range=1y&interval=1d"
         
@@ -436,16 +430,12 @@ def save_signal(x):
 def generate_monthly_report(mode="all", current_m_key=None):
     c = get_db()
 
-    # BIST 100 güncel durum
     m_reg = market_regime()
     xu100_val = f"{m_reg['value']:.2f}" if m_reg["value"] is not None else "Alınamadı"
     regime_text = m_reg["regime"]
 
-    # Hangi sinyaller rapora dahil edilecek?
     if mode == "all":
-        signals = c.execute(
-            "SELECT * FROM signals ORDER BY signal_time ASC"
-        ).fetchall()
+        signals = c.execute("SELECT * FROM signals ORDER BY signal_time ASC").fetchall()
         title = "TÜM ZAMANLAR RAPORU"
     else:
         if current_m_key is None:
@@ -459,10 +449,7 @@ def generate_monthly_report(mode="all", current_m_key=None):
         dt = datetime.strptime(current_m_key, "%Y-%m")
         title = f"{MONTHS[dt.month].upper()} {dt.year} AYLIK RAPORU"
 
-    # Bot çalışma süresi
-    start_row = c.execute(
-        "SELECT value FROM meta WHERE key='start_time'"
-    ).fetchone()
+    start_row = c.execute("SELECT value FROM meta WHERE key='start_time'").fetchone()
     c.close()
 
     if start_row and start_row["value"]:
@@ -504,7 +491,7 @@ def scan_market(chat_id=None):
         if chat_id: telegram_send("🔍 Tarama başlatıldı, piyasa taranıyor...", chat_id)
         
         symbols = get_all_symbols()
-        market = market_regime()  # BIST 100 endeks ve EMA200 bilgisini çeker
+        market = market_regime()
         candidates, scanned_ok = [], 0
 
         for symbol in symbols:
@@ -514,17 +501,14 @@ def scan_market(chat_id=None):
                 if res: candidates.append(res)
             except Exception as e:
                 log.error(f"Analiz hatası ({symbol}): {e}")
-            time.sleep(0.02)
 
         candidates.sort(key=lambda x: (x["score"], x["target_pct"], x["rr"]), reverse=True)
         for c in candidates: save_signal(c)
 
-        # BIST 100 Endeks Bilgilerini Hazırla
         xu100_val = f"{market['value']:.2f}" if market["value"] is not None else "Alınamadı"
         regime_text = market["regime"]
         total_symbols_count = len(symbols)
 
-        # Rapor Başlığı ve Genel Bilgiler
         lines = [
             f"🔍 BIST TARAMA RAPORU - {datetime.now(TZ).strftime('%d.%m.%Y %H:%M')}",
             "━━━━━━━━━━━━━━━━━━",
@@ -534,21 +518,16 @@ def scan_market(chat_id=None):
             "━━━━━━━━━━━━━━━━━━"
         ]
 
-        # Bulunan Hisseler veya Bulunamadı Mesajı
         if not candidates:
             lines.append("❌ Stratejiye uygun hisse bulunamadı.")
         else:
             lines.append(f"🎯 Bulunan Sinyal Sayısı: {len(candidates)}\n")
             for x in candidates:
-              lines.append(
-                f"📌 {x['symbol']} ({x['score']} Puan)\n"
-                f"Giriş: {x['entry']:.2f} | Hedef: {x['target']:.2f} | Stop: {x['stop']:.2f}\n"
-            )
+                lines.append(
+                    f"📌 {x['symbol']} ({x['score']} Puan)\n"
+                    f"Giriş: {x['entry']:.2f} | Hedef: {x['target']:.2f} | Stop: {x['stop']:.2f}\n"
+                )
 
-        total_symbols_count = len(symbols)
-        regime_text = market["regime"]
-
-        # Veritabanına Tarama Geçmişini Kaydet
         c = get_db()
         c.execute("""
             INSERT INTO scans (scan_time, month_key, total_symbols, scanned_ok, candidates, market_regime)
@@ -570,63 +549,95 @@ def scan_market(chat_id=None):
         scan_lock.release()
 
 # ============================================================
-# AÇIK SİNYALLERİ TAKİP ET
+# AÇIK SİNYALLERİ TAKİP ET (MUM-BAZLI TOPLU KONTROL)
 # ============================================================
 
 def track_open_signals():
     while True:
         try:
             c = get_db()
-            signals = c.execute(
-                "SELECT * FROM signals WHERE status='OPEN'"
-            ).fetchall()
+            signals = c.execute("SELECT * FROM signals WHERE status='OPEN'").fetchall()
             c.close()
 
+            if not signals:
+                time.sleep(300)
+                continue
+
+            symbols_list = [yahoo_symbol(s["symbol"]) for s in signals]
+            
+            # Tüm açık hisselerin verisini tek seferde indir
+            data = yf.download(
+                tickers=symbols_list,
+                period="1d",
+                interval="5m",
+                group_by="ticker",
+                progress=False,
+                threads=True
+            )
+
             for s in signals:
-                # Sadece açık olan hissenin en güncel 1 dakikalık fiyatını çeker
-                df = get_history(s["symbol"], period="1d", interval="1m")
+                sym = s["symbol"]
+                y_sym = yahoo_symbol(sym)
 
-                if df.empty:
-                    continue
+                try:
+                    if len(symbols_list) > 1:
+                        df = data[y_sym].dropna() if y_sym in data else pd.DataFrame()
+                    else:
+                        df = data.dropna()
 
-                current_price = float(df["close"].iloc[-1])
+                    if df.empty:
+                        continue
 
-                if current_price >= s["target"]:
-                    c = get_db()
-                    c.execute(
-                        "UPDATE signals SET status='TARGET', exit_price=?, exit_time=? WHERE id=?",
-                        (current_price, datetime.now(TZ).isoformat(), s["id"])
-                    )
-                    c.commit()
-                    c.close()
+                    # Sütun isimlerini garanti olarak küçük harfe çevir
+                    df.columns = [str(col).lower() for col in df.columns]
 
-                    telegram_send(
-                        f"🎯 HEDEF GELDİ!\n\n"
-                        f"📌 {s['symbol']}\n"
-                        f"🎯 Hedef: {s['target']:.2f}\n"
-                        f"📈 Gerçekleşen: {current_price:.2f}"
-                    )
+                    last_high = float(df["high"].iloc[-1])
+                    last_low = float(df["low"].iloc[-1])
+                    last_close = float(df["close"].iloc[-1])
 
-                elif current_price <= s["stop"]:
-                    c = get_db()
-                    c.execute(
-                        "UPDATE signals SET status='STOP', exit_price=?, exit_time=? WHERE id=?",
-                        (current_price, datetime.now(TZ).isoformat(), s["id"])
-                    )
-                    c.commit()
-                    c.close()
+                    # 1. HEDEF KONTROLÜ (Mumun High Değeri)
+                    if last_high >= s["target"]:
+                        db = get_db()
+                        db.execute(
+                            "UPDATE signals SET status='TARGET', exit_price=?, exit_time=? WHERE id=?",
+                            (s["target"], datetime.now(TZ).isoformat(), s["id"])
+                        )
+                        db.commit()
+                        db.close()
 
-                    telegram_send(
-                        f"🛑 STOP GELDİ!\n\n"
-                        f"📌 {s['symbol']}\n"
-                        f"🛑 Stop: {s['stop']:.2f}\n"
-                        f"📉 Gerçekleşen: {current_price:.2f}"
-                    )
+                        telegram_send(
+                            f"🎯 HEDEF GELDİ!\n\n"
+                            f"📌 {sym}\n"
+                            f"🎯 Hedef Seviyesi: {s['target']:.2f}\n"
+                            f"📈 Mum En Yüksek (High): {last_high:.2f}\n"
+                            f"🏁 Kapanış: {last_close:.2f}"
+                        )
 
-            time.sleep(300)  # Güvenli periyot: 5 dakikada bir çalışır
+                    # 2. STOP KONTROLÜ (Mumun Low Değeri)
+                    elif last_low <= s["stop"]:
+                        db = get_db()
+                        db.execute(
+                            "UPDATE signals SET status='STOP', exit_price=?, exit_time=? WHERE id=?",
+                            (s["stop"], datetime.now(TZ).isoformat(), s["id"])
+                        )
+                        db.commit()
+                        db.close()
+
+                        telegram_send(
+                            f"🛑 STOP GELDİ!\n\n"
+                            f"📌 {sym}\n"
+                            f"🛑 Stop Seviyesi: {s['stop']:.2f}\n"
+                            f"📉 Mum En Düşük (Low): {last_low:.2f}\n"
+                            f"🏁 Kapanış: {last_close:.2f}"
+                        )
+
+                except Exception as ex:
+                    log.error(f"Sinyal takip hatası ({sym}): {ex}")
+
+            time.sleep(300)
 
         except Exception as e:
-            log.error(f"❌ Sinyal takip hatası: {e}")
+            log.error(f"❌ Sinyal takip genel döngü hatası: {e}")
             time.sleep(60)
 
 # ============================================================
@@ -674,7 +685,7 @@ def telegram_poll_loop():
 
 
 # ============================================================
-# UYUMAMA (KEEP-ALIVE) THREAD'İ
+# UYUMAMA (KEEP-ALIVE) THREAD'İ & SCHEDULER
 # ============================================================
 
 def keep_alive():
@@ -689,18 +700,15 @@ def scheduler():
             now = datetime.now(TZ)
             today_str = now.strftime("%Y-%m-%d")
             
-            # 1. HER İŞ GÜNÜ SAAT 18:30'DA OTOMATİK TARAMA
             if (is_trade_day(now.date()) and now.hour == SCAN_HOUR and now.minute == SCAN_MINUTE and last_scan_date != today_str):
                 last_scan_date = today_str
                 log.info(f"⏰ Otomatik tarama tetiklendi: {today_str}")
                 
-                # 2. EĞER BUGÜN AYIN SON İŞ GÜNÜYSE TRAMADAN SONRA AYLIK RAPORU OTOMATİK AT
                 if is_last_trade_day_of_month(now.date()):
                     log.info("📊 Ayın son işlem günü! Tarama başlatılıyor...")
 
                     def month_end_scan_and_report():
                         scan_market()
-
                         log.info("✅ Ay sonu taraması bitti. Aylık rapor oluşturuluyor...")
                         rep = generate_monthly_report(mode="monthly")
                         telegram_send(f"🚨 AY SONU KAPANIŞ RAPORU 🚨\n\n{rep}")
@@ -732,12 +740,7 @@ def start_bot_background_services():
     services_started = True
     log.info("🚀 BIST Botu Servisleri Başlatılıyor...")
     
-    # Telegram Başlangıç Bildirimi
-    sent = telegram_send("🚀 BIST Tarama Botu başarıyla başlatıldı ve servise girdi!")
-    if not sent:
-        log.error("⚠️ Başlangıç mesajı Telegram'a GÖNDERİLEMEDİ! Token veya Chat ID dizilimlerini kontrol edin.")
-
-    # Thread'ler
+    threading.Thread(target=telegram_send, args=("🚀 BIST Tarama Botu başarıyla başlatıldı ve servise girdi!",), daemon=True).start()
     threading.Thread(target=scheduler, daemon=True).start()
     threading.Thread(target=telegram_poll_loop, daemon=True).start()
     threading.Thread(target=keep_alive, daemon=True).start()
@@ -746,10 +749,6 @@ def start_bot_background_services():
 # ============================================================
 # FLASK
 # ============================================================
-
-@app.before_request
-def initialize_once():
-    start_bot_background_services()
 
 @app.get("/")
 def home():
