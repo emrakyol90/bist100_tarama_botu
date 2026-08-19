@@ -540,7 +540,7 @@ def scan_market(chat_id=None):
         else:
             lines.append(f"🎯 Bulunan Sinyal Sayısı: {len(candidates)}\n")
             for x in candidates:
-            lines.append(
+             lines.append(
                 f"📌 {x['symbol']} ({x['score']} Puan)\n"
                 f"Giriş: {x['entry']:.2f} | Hedef: {x['target']:.2f} | Stop: {x['stop']:.2f}\n"
             )
