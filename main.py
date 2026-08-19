@@ -79,6 +79,7 @@ def is_last_trade_day_of_month(dt_obj):
 # ============================================================
 
 app = Flask(__name__)
+services_started = False
 scan_lock = threading.Lock()
 
 MONTHS = {
@@ -89,7 +90,7 @@ MONTHS = {
 
 
 def get_db():
-    c = sqlite3.connect(DB_FILE, check_same_thread=False)
+    c = sqlite3.connect(DB_FILE, check_same_thread=False, timeout=30.0)
     c.row_factory = sqlite3.Row
     c.execute("PRAGMA journal_mode=WAL;")
     return c
@@ -432,51 +433,66 @@ def save_signal(x):
     c.close()
     return False
 
-def generate_monthly_report(current_m_key=None):
-    if not current_m_key: current_m_key = month_key()
+def generate_monthly_report(mode="all", current_m_key=None):
     c = get_db()
-    
-    # Bot çalışma süresi hesaplama
-    start_time_str = c.execute("SELECT value FROM meta WHERE key='start_time'").fetchone()
-    if start_time_str and start_time_str["value"]:
-        start_dt = datetime.fromisoformat(start_time_str["value"])
+
+    # BIST 100 güncel durum
+    m_reg = market_regime()
+    xu100_val = f"{m_reg['value']:.2f}" if m_reg["value"] is not None else "Alınamadı"
+    regime_text = m_reg["regime"]
+
+    # Hangi sinyaller rapora dahil edilecek?
+    if mode == "all":
+        signals = c.execute(
+            "SELECT * FROM signals ORDER BY signal_time ASC"
+        ).fetchall()
+        title = "TÜM ZAMANLAR RAPORU"
+    else:
+        if current_m_key is None:
+            current_m_key = month_key()
+
+        signals = c.execute(
+            "SELECT * FROM signals WHERE month_key=? ORDER BY signal_time ASC",
+            (current_m_key,)
+        ).fetchall()
+
+        dt = datetime.strptime(current_m_key, "%Y-%m")
+        title = f"{MONTHS[dt.month].upper()} {dt.year} AYLIK RAPORU"
+
+    # Bot çalışma süresi
+    start_row = c.execute(
+        "SELECT value FROM meta WHERE key='start_time'"
+    ).fetchone()
+    c.close()
+
+    if start_row and start_row["value"]:
+        start_dt = datetime.fromisoformat(start_row["value"])
         uptime_days = (datetime.now(TZ) - start_dt).days
         uptime_text = f"{uptime_days} Gün"
     else:
         uptime_text = "Bilinmiyor"
 
-    # Güncel BIST 100 ve Rejim bilgisi
-    m_reg = market_regime()
-    xu100_val = f"{m_reg['value']:.2f}" if m_reg['value'] else "Alınamadı"
-    regime_text = m_reg['regime']
-
-    signals = c.execute("SELECT * FROM signals WHERE month_key=? ORDER BY signal_time ASC", (current_m_key,)).fetchall()
-    c.close()
-    
-    now = datetime.now(TZ)
-    m_name = MONTHS.get(now.month, "")
-
-    if not signals:
-        return f"📊 BIST BOTU - {m_name.upper()} {now.year} GÜNCEL RAPORU\n━━━━━━━━━━━━━━━━━━\n⏱️ Bot Çalışma Süresi: {uptime_text}\n📈 BIST 100 Endeks: {xu100_val}\n🚦 Piyasa Trendi: {regime_text}\n━━━━━━━━━━━━━━━━━━\n\nBu ay için henüz kayıtlı sinyal bulunmuyor."
-
     total = len(signals)
     target_cnt = sum(1 for s in signals if s["status"] == "TARGET")
     stop_cnt = sum(1 for s in signals if s["status"] == "STOP")
     open_cnt = sum(1 for s in signals if s["status"] == "OPEN")
-    completed = target_cnt + stop_cnt
-    win_rate = (target_cnt / completed * 100) if completed > 0 else 0
 
-    lines = [
-        f"📊 BIST BOTU - {m_name.upper()} {now.year} GÜNCEL RAPORU",
-        "━━━━━━━━━━━━━━━━━━",
-        f"⏱️ Bot Çalışma Süresi: {uptime_text}",
-        f"📈 BIST 100 Endeks: {xu100_val}",
-        f"🚦 Piyasa Trendi: {regime_text}",
-        "━━━━━━━━━━━━━━━━━━",
-        f"🎯 Toplam Sinyal: {total} | ✅ Hedef: {target_cnt} | 🛑 Stop: {stop_cnt} | ⏳ Açık: {open_cnt}",
-        f"🏆 Başarı Oranı: %{win_rate:.1f}\n"
-    ]
-    return "\n".join(lines)
+    completed = target_cnt + stop_cnt
+    win_rate = (target_cnt / completed * 100) if completed else 0
+
+    return (
+        f"📊 BIST BOTU - {title}\n"
+        f"━━━━━━━━━━━━━━━━━━\n"
+        f"⏱️ Bot Çalışma Süresi: {uptime_text}\n"
+        f"📈 BIST 100 Endeks: {xu100_val}\n"
+        f"🚦 Piyasa Trendi: {regime_text}\n"
+        f"━━━━━━━━━━━━━━━━━━\n"
+        f"🎯 Toplam Sinyal: {total}\n"
+        f"✅ Hedef: {target_cnt}\n"
+        f"🛑 Stop: {stop_cnt}\n"
+        f"⏳ Açık: {open_cnt}\n"
+        f"🏆 Win Rate: %{win_rate:.1f}"
+    )
 
 def scan_market(chat_id=None):
     if not scan_lock.acquire(blocking=False):
@@ -488,7 +504,7 @@ def scan_market(chat_id=None):
         if chat_id: telegram_send("🔍 Tarama başlatıldı, piyasa taranıyor...", chat_id)
         
         symbols = get_all_symbols()
-        market = market_regime()
+        market = market_regime()  # BIST 100 endeks ve EMA200 bilgisini çeker
         candidates, scanned_ok = [], 0
 
         for symbol in symbols:
@@ -503,18 +519,115 @@ def scan_market(chat_id=None):
         candidates.sort(key=lambda x: (x["score"], x["target_pct"], x["rr"]), reverse=True)
         for c in candidates: save_signal(c)
 
-        lines = [f"🔍 BIST TARAMA RAPORU - {datetime.now(TZ).strftime('%d.%m.%Y %H:%M')}", "━━━━━━━━━━━━━━━━━━"]
+        # BIST 100 Endeks Bilgilerini Hazırla
+        xu100_val = f"{market['value']:.2f}" if market["value"] is not None else "Alınamadı"
+        regime_text = market["regime"]
+        total_symbols_count = len(symbols)
+
+        # Rapor Başlığı ve Genel Bilgiler
+        lines = [
+            f"🔍 BIST TARAMA RAPORU - {datetime.now(TZ).strftime('%d.%m.%Y %H:%M')}",
+            "━━━━━━━━━━━━━━━━━━",
+            f"📈 BIST 100 Endeks: {xu100_val}",
+            f"🚦 Piyasa Trendi: {regime_text}",
+            f"📊 Taranan Hisse Sayısı: {total_symbols_count} (Başarılı: {scanned_ok})",
+            "━━━━━━━━━━━━━━━━━━"
+        ]
+
+        # Bulunan Hisseler veya Bulunamadı Mesajı
         if not candidates:
             lines.append("❌ Stratejiye uygun hisse bulunamadı.")
         else:
+            lines.append(f"🎯 Bulunan Sinyal Sayısı: {len(candidates)}\n")
             for x in candidates:
-                lines.append(f"📌 {x['symbol']} ({x['score']} Puan)\nGiriş: {x['entry']:.2f} | Hedef: {x['target']:.2f} | Stop: {x['stop']:.2f}\n")
+            lines.append(
+                f"📌 {x['symbol']} ({x['score']} Puan)\n"
+                f"Giriş: {x['entry']:.2f} | Hedef: {x['target']:.2f} | Stop: {x['stop']:.2f}\n"
+            )
+
+        total_symbols_count = len(symbols)
+        regime_text = market["regime"]
+
+        # Veritabanına Tarama Geçmişini Kaydet
+        c = get_db()
+        c.execute("""
+            INSERT INTO scans (scan_time, month_key, total_symbols, scanned_ok, candidates, market_regime)
+            VALUES (?, ?, ?, ?, ?, ?)
+        """, (
+            datetime.now(TZ).isoformat(),
+            month_key(),
+            total_symbols_count,
+            scanned_ok,
+            len(candidates),
+            regime_text
+        ))
+        c.commit()
+        c.close()
 
         telegram_long("\n".join(lines), chat_id or TELEGRAM_CHAT_ID)
         log.info("✅ Tarama başarıyla bitti.")
     finally:
         scan_lock.release()
 
+# ============================================================
+# AÇIK SİNYALLERİ TAKİP ET
+# ============================================================
+
+def track_open_signals():
+    while True:
+        try:
+            c = get_db()
+            signals = c.execute(
+                "SELECT * FROM signals WHERE status='OPEN'"
+            ).fetchall()
+            c.close()
+
+            for s in signals:
+                # Sadece açık olan hissenin en güncel 1 dakikalık fiyatını çeker
+                df = get_history(s["symbol"], period="1d", interval="1m")
+
+                if df.empty:
+                    continue
+
+                current_price = float(df["close"].iloc[-1])
+
+                if current_price >= s["target"]:
+                    c = get_db()
+                    c.execute(
+                        "UPDATE signals SET status='TARGET', exit_price=?, exit_time=? WHERE id=?",
+                        (current_price, datetime.now(TZ).isoformat(), s["id"])
+                    )
+                    c.commit()
+                    c.close()
+
+                    telegram_send(
+                        f"🎯 HEDEF GELDİ!\n\n"
+                        f"📌 {s['symbol']}\n"
+                        f"🎯 Hedef: {s['target']:.2f}\n"
+                        f"📈 Gerçekleşen: {current_price:.2f}"
+                    )
+
+                elif current_price <= s["stop"]:
+                    c = get_db()
+                    c.execute(
+                        "UPDATE signals SET status='STOP', exit_price=?, exit_time=? WHERE id=?",
+                        (current_price, datetime.now(TZ).isoformat(), s["id"])
+                    )
+                    c.commit()
+                    c.close()
+
+                    telegram_send(
+                        f"🛑 STOP GELDİ!\n\n"
+                        f"📌 {s['symbol']}\n"
+                        f"🛑 Stop: {s['stop']:.2f}\n"
+                        f"📉 Gerçekleşen: {current_price:.2f}"
+                    )
+
+            time.sleep(300)  # Güvenli periyot: 5 dakikada bir çalışır
+
+        except Exception as e:
+            log.error(f"❌ Sinyal takip hatası: {e}")
+            time.sleep(60)
 
 # ============================================================
 # TELEGRAM SOHBET DİNLEYİCİ (POLLING LOOP)
@@ -532,7 +645,7 @@ def telegram_poll_loop():
     while True:
         try:
             url = f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}/getUpdates?offset={offset}&timeout=10"
-            r = requests.get(url, timeout=15)
+            r = requests.get(url, timeout=30)
             if r.ok:
                 updates = r.json().get("result", [])
                 for update in updates:
@@ -546,7 +659,7 @@ def telegram_poll_loop():
                     log.info(f"📩 Telegram'dan Komut Geldi: '{text}' (Chat ID: {chat_id})")
 
                     if "rapor" in text:
-                        rep = generate_monthly_report()
+                        rep = generate_monthly_report(mode="all")
                         telegram_send(rep, chat_id)
                     elif "tarama" in text or "tara" in text or text == "/scan":
                         threading.Thread(target=scan_market, args=(chat_id,), daemon=True).start()
@@ -565,16 +678,9 @@ def telegram_poll_loop():
 # ============================================================
 
 def keep_alive():
-    """Render'ın ücretsiz planının sunucuyu uyutmasını engellemek için kendine istek atar."""
-    log.info("😴 Keep-Alive (Uyumama) servisi aktif edildi.")
+    log.info("😴 Keep-Alive servisi aktif.")
     while True:
-        time.sleep(600)  # 10 dakikada bir çalış
-        try:
-            log.info("⏰ Sunucu aktif tutuluyor (Self-Ping)...")
-            requests.get(f"http://127.0.0.1:{PORT}/", timeout=5)
-        except Exception as e:
-            log.warning(f"Self-ping uyarısı: {e}")
-
+        time.sleep(600)
 
 def scheduler():
     last_scan_date = ""
@@ -587,13 +693,28 @@ def scheduler():
             if (is_trade_day(now.date()) and now.hour == SCAN_HOUR and now.minute == SCAN_MINUTE and last_scan_date != today_str):
                 last_scan_date = today_str
                 log.info(f"⏰ Otomatik tarama tetiklendi: {today_str}")
-                threading.Thread(target=scan_market, daemon=True).start()
                 
                 # 2. EĞER BUGÜN AYIN SON İŞ GÜNÜYSE TRAMADAN SONRA AYLIK RAPORU OTOMATİK AT
                 if is_last_trade_day_of_month(now.date()):
-                    log.info("📊 Ayın son işlem günü! Otomatik aylık rapor gönderiliyor...")
-                    rep = generate_monthly_report()
-                    telegram_send(f"🚨 *AY SONU KAPANIŞ RAPORU* 🚨\n\n{rep}")
+                    log.info("📊 Ayın son işlem günü! Tarama başlatılıyor...")
+
+                    def month_end_scan_and_report():
+                        scan_market()
+
+                        log.info("✅ Ay sonu taraması bitti. Aylık rapor oluşturuluyor...")
+                        rep = generate_monthly_report(mode="monthly")
+                        telegram_send(f"🚨 AY SONU KAPANIŞ RAPORU 🚨\n\n{rep}")
+
+                    threading.Thread(
+                        target=month_end_scan_and_report,
+                        daemon=True
+                    ).start()
+
+                else:
+                    threading.Thread(
+                        target=scan_market,
+                        daemon=True
+                    ).start()
 
             time.sleep(20)
         except Exception as e:
@@ -605,6 +726,9 @@ def scheduler():
 # ============================================================
 
 def start_bot_background_services():
+    global services_started
+    if services_started: return
+    services_started = True
     log.info("🚀 BIST Botu Servisleri Başlatılıyor...")
     
     # Telegram Başlangıç Bildirimi
@@ -616,11 +740,13 @@ def start_bot_background_services():
     threading.Thread(target=scheduler, daemon=True).start()
     threading.Thread(target=telegram_poll_loop, daemon=True).start()
     threading.Thread(target=keep_alive, daemon=True).start()
+    threading.Thread(target=track_open_signals, daemon=True).start()
 
 # Sunucu başlangıcında arka plan servislerini bağımsız çalıştır
 def init_app():
     log.info("⚙️ Arka plan servisleri başlatılıyor...")
     threading.Thread(target=start_bot_background_services, daemon=True).start()
+
 # ============================================================
 # FLASK
 # ============================================================
@@ -638,6 +764,7 @@ def manual_scan():
     threading.Thread(target=scan_market, daemon=True).start()
     return jsonify({"ok": True, "message": "Tarama başlatıldı."})
 
+init_app()
+
 if __name__ == "__main__":
-    start_bot_background_services()
     app.run(host="0.0.0.0", port=PORT, use_reloader=False)
