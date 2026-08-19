@@ -540,7 +540,7 @@ def scan_market(chat_id=None):
         else:
             lines.append(f"🎯 Bulunan Sinyal Sayısı: {len(candidates)}\n")
             for x in candidates:
-             lines.append(
+              lines.append(
                 f"📌 {x['symbol']} ({x['score']} Puan)\n"
                 f"Giriş: {x['entry']:.2f} | Hedef: {x['target']:.2f} | Stop: {x['stop']:.2f}\n"
             )
@@ -727,7 +727,8 @@ def scheduler():
 
 def start_bot_background_services():
     global services_started
-    if services_started: return
+    if services_started: 
+        return
     services_started = True
     log.info("🚀 BIST Botu Servisleri Başlatılıyor...")
     
@@ -742,10 +743,8 @@ def start_bot_background_services():
     threading.Thread(target=keep_alive, daemon=True).start()
     threading.Thread(target=track_open_signals, daemon=True).start()
 
-# Sunucu başlangıcında arka plan servislerini bağımsız çalıştır
-def init_app():
-    log.info("⚙️ Arka plan servisleri başlatılıyor...")
-    threading.Thread(target=start_bot_background_services, daemon=True).start()
+# Arka plan servislerini tek sefer doğrudan çalıştır
+start_bot_background_services()
 
 # ============================================================
 # FLASK
@@ -763,8 +762,6 @@ def get_report():
 def manual_scan():
     threading.Thread(target=scan_market, daemon=True).start()
     return jsonify({"ok": True, "message": "Tarama başlatıldı."})
-
-init_app()
 
 if __name__ == "__main__":
     app.run(host="0.0.0.0", port=PORT, use_reloader=False)
