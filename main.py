@@ -366,7 +366,9 @@ def fundamental_score(symbol):
         return 0
 
 def final_score(tech, fund):
-    if tech < 40: return 0
+    # Teknik en az 50, temel en az 5 puan almalı (Toplam min 55)
+    if tech < 50 or fund < 5:
+        return 0
     return tech + fund
 
 def trade_plan(t):
@@ -417,6 +419,13 @@ def month_key(dt=None):
     return f"{dt.year:04d}-{dt.month:02d}"
 
 def analyze_symbol(symbol):
+    # Açık sinyal kontrolü (Takipteyse pas geç)
+    c = get_db()
+    open_sig = c.execute("SELECT id FROM signals WHERE symbol=? AND status='OPEN'", (symbol,)).fetchone()
+    c.close()
+    if open_sig:
+        return None, False
+
     daily = get_history(symbol, "2y", "1d")
     if daily.empty: return None, False
     hourly = get_history(symbol, "60d", "1h")
@@ -433,11 +442,15 @@ def analyze_symbol(symbol):
 def save_signal(x):
     now = datetime.now(TZ)
     c = get_db()
-    exists = c.execute("SELECT id FROM signals WHERE symbol=? AND signal_time LIKE ?", (x["symbol"], now.strftime("%Y-%m-%d") + "%")).fetchone()
+    exists = c.execute(
+        "SELECT id FROM signals WHERE symbol=? AND (signal_time LIKE ? OR status='OPEN')", 
+        (x["symbol"], now.strftime("%Y-%m-%d") + "%")
+    ).fetchone()
+    
     if not exists:
         c.execute("""
-        INSERT INTO signals(symbol, signal_time, month_key, score, technical_score, fundamental_score, entry, target, stop, target_pct, rr)
-        VALUES(?,?,?,?,?,?,?,?,?,?,?)
+        INSERT INTO signals(symbol, signal_time, month_key, score, technical_score, fundamental_score, entry, target, stop, target_pct, rr, status)
+        VALUES(?,?,?,?,?,?,?,?,?,?,?,'OPEN')
         """, (x["symbol"], now.isoformat(), month_key(now), x["score"], x["technical_score"], x["fundamental_score"], x["entry"], x["target"], x["stop"], x["target_pct"], x["rr"]))
         c.commit()
         c.close()
@@ -541,11 +554,13 @@ def scan_market(chat_id=None):
         else:
             lines.append(f"🎯 Bulunan Sinyal Sayısı: {len(candidates)}\n")
             for x in candidates:
+                puan = x['score']
+                seviye = "🔥 MÜKEMMEL (100+)" if puan >= 100 else "🌟 ÇOK İYİ (75+)" if puan >= 75 else "👍 İYİ (65+)" if puan >= 65 else "⚡ BAŞLANGIÇ (55+)"
+                
                 lines.append(
-                    f"📌 {x['symbol']} ({x['score']} Puan)\n"
+                    f"📌 {x['symbol']} - {puan} Puan [{seviye}]\n"
                     f"Giriş: {x['entry']:.2f} | Hedef: {x['target']:.2f} | Stop: {x['stop']:.2f}\n"
                 )
-
         c = get_db()
         c.execute("""
             INSERT INTO scans (scan_time, month_key, total_symbols, scanned_ok, candidates, market_regime)
@@ -598,10 +613,13 @@ def track_open_signals():
                 y_sym = yahoo_symbol(sym)
 
                 try:
-                    if isinstance(data.columns, pd.MultiIndex) and y_sym in data.columns.get_level_values(0):
-                        df = data[y_sym].dropna()
+                    if len(signals) == 1:
+                        df = data.dropna().copy()
                     else:
-                        df = data.dropna()
+                        if isinstance(data.columns, pd.MultiIndex) and y_sym in data.columns.get_level_values(0):
+                            df = data[y_sym].dropna().copy()
+                        else:
+                            df = pd.DataFrame()
 
                     if df.empty:
                         continue
@@ -609,12 +627,44 @@ def track_open_signals():
                     # Sütun isimlerini garanti olarak küçük harfe çevir
                     df.columns = [str(col).lower() for col in df.columns]
 
-                    last_high = float(df["high"].iloc[-1])
-                    last_low = float(df["low"].iloc[-1])
-                    last_close = float(df["close"].iloc[-1])
+                    # SADECE SİNYAL OLUŞTUKTAN SONRAKİ MUMları takip et
+                    signal_dt = datetime.fromisoformat(s["signal_time"])
+                    if signal_dt.tzinfo is None:
+                        signal_dt = signal_dt.replace(tzinfo=TZ)
+                    
+                    if df.index.tz is None:
+                        df.index = df.index.tz_localize(TZ)
+                    else:
+                        df.index = df.index.tz_convert(TZ)
+                    
+                    df_after_signal = df[df.index > signal_dt]
+                    
+                    if df_after_signal.empty:
+                        continue
+                    
+                    last_high = float(df_after_signal["high"].max())
+                    last_low = float(df_after_signal["low"].min())
+                    last_close = float(df_after_signal["close"].iloc[-1])
+                    # 1. ÇİFT İHLAL KONTROLÜ (Aynı mumda ikisi de olduysa Stop say)
+                    if last_high >= s["target"] and last_low <= s["stop"]:
+                        db = get_db()
+                        db.execute(
+                            "UPDATE signals SET status='STOP', exit_price=?, exit_time=? WHERE id=?",
+                            (s["stop"], datetime.now(TZ).isoformat(), s["id"])
+                        )
+                        db.commit()
+                        db.close()
 
-                    # 1. HEDEF KONTROLÜ (Mumun High Değeri)
-                    if last_high >= s["target"]:
+                        telegram_send(
+                            f"⚠️ AŞIRI VOLATİLİTE / ÇİFT İHLAL!\n\n"
+                            f"📌 {sym}\n"
+                            f"Aynı mumda hem hedef hem stop görüldü. Kasayı korumak için STOP kabul edildi.\n"
+                            f"🛑 Stop Seviyesi: {s['stop']:.2f}\n"
+                            f"🏁 Kapanış: {last_close:.2f}"
+                        )
+
+                    # 2. SADECE HEDEF KONTROLÜ
+                    elif last_high >= s["target"]:
                         db = get_db()
                         db.execute(
                             "UPDATE signals SET status='TARGET', exit_price=?, exit_time=? WHERE id=?",
@@ -631,7 +681,7 @@ def track_open_signals():
                             f"🏁 Kapanış: {last_close:.2f}"
                         )
 
-                    # 2. STOP KONTROLÜ (Mumun Low Değeri)
+                    # 3. SADECE STOP KONTROLÜ
                     elif last_low <= s["stop"]:
                         db = get_db()
                         db.execute(
