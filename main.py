@@ -365,12 +365,6 @@ def fundamental_score(symbol):
     except Exception: 
         return 0
 
-def final_score(tech, fund):
-    # Teknik en az 50, temel en az 5 puan almalı (Toplam min 55)
-    if tech < 50 or fund < 5:
-        return 0
-    return tech + fund
-
 def trade_plan(t):
     entry = t["close"]
     r_dist = max(t["atr"] * 1.5, entry * 0.01)
@@ -414,49 +408,112 @@ def market_regime():
         log.error(f"Market rejim hatası: {e}")
         return {"value": None, "ema200": None, "regime": "BİLİNMİYOR"}
 
+
 def month_key(dt=None):
-    if dt is None: dt = datetime.now(TZ)
+    if dt is None:
+        dt = datetime.now(TZ)
     return f"{dt.year:04d}-{dt.month:02d}"
 
-def analyze_symbol(symbol):
-    # Açık sinyal kontrolü (Takipteyse pas geç)
+def save_signal(x):
     c = get_db()
-    open_sig = c.execute("SELECT id FROM signals WHERE symbol=? AND status='OPEN'", (symbol,)).fetchone()
+
+    today = datetime.now(TZ).strftime("%Y-%m-%d")
+
+    existing = c.execute("""
+        SELECT 1 FROM signals
+        WHERE symbol=?
+        AND date(signal_time)=?
+    """, (x["symbol"], today)).fetchone()
+
+    if existing:
+        c.close()
+        return False
+
+    c.execute("""
+    INSERT INTO signals (
+        symbol, signal_time, month_key,
+        score, technical_score, fundamental_score,
+        entry, target, stop, target_pct, rr, status
+    )
+    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'OPEN')
+    """, (
+        x["symbol"],
+        datetime.now(TZ).isoformat(),
+        month_key(),
+        x["score"],
+        x["technical_score"],
+        x["fundamental_score"],
+        x["entry"],
+        x["target"],
+        x["stop"],
+        x["target_pct"],
+        x["rr"]
+    ))
+
+    c.commit()
     c.close()
+    return True
+
+    
+
+def analyze_symbol(symbol):
+    # Açık sinyal kontrolü
+    c = get_db()
+    open_sig = c.execute(
+        "SELECT id FROM signals WHERE symbol=? AND status='OPEN'",
+        (symbol,)
+    ).fetchone()
+    c.close()
+
     if open_sig:
-        return None, False
+        return None, False, "OPEN"
 
     daily = get_history(symbol, "2y", "1d")
-    if daily.empty: return None, False
-    hourly = get_history(symbol, "60d", "1h")
-    if hourly.empty: return None, False
-    tech = technical_analysis(daily, to_4h(hourly))
-    if not tech or tech["close"] <= tech["ema200"] or not tech["wt_signal"]: return None, True
-    fund = fundamental_score(symbol)
-    score = final_score(tech["technical_score"], fund)
-    if score == 0: return None, True
-    plan = trade_plan(tech)
-    if not plan: return None, True
-    return {"symbol": symbol, "score": score, "technical_score": tech["technical_score"], "fundamental_score": fund, **plan}, True
+    if daily.empty:
+        return None, False, "DATA"
 
-def save_signal(x):
-    now = datetime.now(TZ)
-    c = get_db()
-    exists = c.execute(
-        "SELECT id FROM signals WHERE symbol=? AND (signal_time LIKE ? OR status='OPEN')", 
-        (x["symbol"], now.strftime("%Y-%m-%d") + "%")
-    ).fetchone()
-    
-    if not exists:
-        c.execute("""
-        INSERT INTO signals(symbol, signal_time, month_key, score, technical_score, fundamental_score, entry, target, stop, target_pct, rr, status)
-        VALUES(?,?,?,?,?,?,?,?,?,?,?,'OPEN')
-        """, (x["symbol"], now.isoformat(), month_key(now), x["score"], x["technical_score"], x["fundamental_score"], x["entry"], x["target"], x["stop"], x["target_pct"], x["rr"]))
-        c.commit()
-        c.close()
-        return True
-    c.close()
-    return False
+    hourly = get_history(symbol, "60d", "1h")
+    if hourly.empty:
+        return None, False, "DATA"
+
+    tech = technical_analysis(daily, to_4h(hourly))
+
+    if not tech:
+        return None, True, "TECH"
+
+    # EMA200 filtresi
+    if tech["close"] <= tech["ema200"]:
+        return None, True, "EMA200"
+
+    # WT filtresi
+    if not tech["wt_signal"]:
+        return None, True, "WT"
+
+    # Teknik skor filtresi
+    if tech["technical_score"] < 50:
+        return None, True, "TECH_SCORE"
+
+    fund = fundamental_score(symbol)
+
+    # Temel skor filtresi
+    if fund < 5:
+        return None, True, "FUND"
+
+    score = tech["technical_score"] + fund
+
+    plan = trade_plan(tech)
+
+    # Hedef / RR filtresi
+    if not plan:
+        return None, True, "PLAN"
+
+    return {
+        "symbol": symbol,
+        "score": score,
+        "technical_score": tech["technical_score"],
+        "fundamental_score": fund,
+        **plan
+    }, True, "SIGNAL"
 
 def generate_monthly_report(mode="all", current_m_key=None):
     c = get_db()
@@ -514,56 +571,166 @@ def generate_monthly_report(mode="all", current_m_key=None):
 
 def scan_market(chat_id=None):
     if not scan_lock.acquire(blocking=False):
-        if chat_id: telegram_send("⚠️ Taramada zaten aktif bir işlem yürütülüyor.", chat_id)
+        if chat_id:
+            telegram_send("⚠️ Taramada zaten aktif bir işlem yürütülüyor.", chat_id)
         return
 
     try:
         log.info("🔍 Tarama süreci başlatıldı...")
-        if chat_id: telegram_send("🔍 Tarama başlatıldı, piyasa taranıyor...", chat_id)
-        
+
+        if chat_id:
+            telegram_send("🔍 Tarama başlatıldı, piyasa taranıyor...", chat_id)
+
         symbols = get_all_symbols()
         market = market_regime()
-        candidates, scanned_ok = [], 0
+
+        candidates = []
+        scanned_ok = 0
+
+        # ============================================================
+        # FİLTRE ELEME SAYAÇLARI
+        # ============================================================
+
+        count_ema200 = 0
+        count_wt = 0
+        count_tech = 0
+        count_fund = 0
+        count_plan = 0
 
         for symbol in symbols:
             try:
-                res, ok = analyze_symbol(symbol)
-                if ok: scanned_ok += 1
-                if res: candidates.append(res)
+                res, ok, reason = analyze_symbol(symbol)
+
+                if ok:
+                    scanned_ok += 1
+
+                # Hangi aşamada elendi?
+                if reason == "EMA200":
+                    count_ema200 += 1
+
+                elif reason == "WT":
+                    count_wt += 1
+
+                elif reason == "TECH_SCORE":
+                    count_tech += 1
+
+                elif reason == "FUND":
+                    count_fund += 1
+
+                elif reason == "PLAN":
+                    count_plan += 1
+
+                elif reason == "SIGNAL":
+                    candidates.append(res)
+
             except Exception as e:
                 log.error(f"Analiz hatası ({symbol}): {e}")
 
-        candidates.sort(key=lambda x: (x["score"], x["target_pct"], x["rr"]), reverse=True)
-        for c in candidates: save_signal(c)
+        # ============================================================
+        # ADAYLARI SIRALA VE KAYDET
+        # ============================================================
 
-        xu100_val = f"{market['value']:.2f}" if market["value"] is not None else "Alınamadı"
+        candidates.sort(
+            key=lambda x: (
+                x["score"],
+                x["target_pct"],
+                x["rr"]
+            ),
+            reverse=True
+        )
+
+        for candidate in candidates:
+            save_signal(candidate)
+
+        xu100_val = (
+            f"{market['value']:.2f}"
+            if market["value"] is not None
+            else "Alınamadı"
+        )
+
         regime_text = market["regime"]
         total_symbols_count = len(symbols)
 
+        # ============================================================
+        # TELEGRAM RAPORU
+        # ============================================================
+
         lines = [
-            f"🔍 BIST TARAMA RAPORU - {datetime.now(TZ).strftime('%d.%m.%Y %H:%M')}",
+            f"🔍 BIST TARAMA RAPORU - "
+            f"{datetime.now(TZ).strftime('%d.%m.%Y %H:%M')}",
+
             "━━━━━━━━━━━━━━━━━━",
+
             f"📈 BIST 100 Endeks: {xu100_val}",
             f"🚦 Piyasa Trendi: {regime_text}",
-            f"📊 Taranan Hisse Sayısı: {total_symbols_count} (Başarılı: {scanned_ok})",
+            f"📊 Taranan Hisse Sayısı: "
+            f"{total_symbols_count} (Başarılı: {scanned_ok})",
+
+            "━━━━━━━━━━━━━━━━━━",
+
+            "🔎 FİLTRE ELEME RAPORU:",
+
+            f"❌ EMA200 altında: {count_ema200}",
+            f"❌ WT şartı: {count_wt}",
+            f"❌ Teknik puan: {count_tech}",
+            f"❌ Temel puan: {count_fund}",
+            f"❌ Hedef / RR: {count_plan}",
+
+            f"🎯 Final uygun: {len(candidates)}",
+
             "━━━━━━━━━━━━━━━━━━"
         ]
 
         if not candidates:
-            lines.append("❌ Stratejiye uygun hisse bulunamadı.")
+
+            lines.append(
+                "❌ Stratejiye uygun hisse bulunamadı."
+            )
+
         else:
-            lines.append(f"🎯 Bulunan Sinyal Sayısı: {len(candidates)}\n")
+
+            lines.append(
+                f"🎯 Bulunan Sinyal Sayısı: "
+                f"{len(candidates)}\n"
+            )
+
             for x in candidates:
-                puan = x['score']
-                seviye = "🔥 MÜKEMMEL (100+)" if puan >= 100 else "🌟 ÇOK İYİ (75+)" if puan >= 75 else "👍 İYİ (65+)" if puan >= 65 else "⚡ BAŞLANGIÇ (55+)"
-                
-                lines.append(
-                    f"📌 {x['symbol']} - {puan} Puan [{seviye}]\n"
-                    f"Giriş: {x['entry']:.2f} | Hedef: {x['target']:.2f} | Stop: {x['stop']:.2f}\n"
+
+                puan = x["score"]
+
+                seviye = (
+                    "🔥 MÜKEMMEL (100+)"
+                    if puan >= 100
+                    else "🌟 ÇOK İYİ (75+)"
+                    if puan >= 75
+                    else "👍 İYİ (65+)"
+                    if puan >= 65
+                    else "⚡ BAŞLANGIÇ (55+)"
                 )
+
+                lines.append(
+                    f"📌 {x['symbol']} - "
+                    f"{puan} Puan [{seviye}]\n"
+                    f"Giriş: {x['entry']:.2f} | "
+                    f"Hedef: {x['target']:.2f} | "
+                    f"Stop: {x['stop']:.2f}\n"
+                )
+
+        # ============================================================
+        # TARAMA KAYDI
+        # ============================================================
+
         c = get_db()
+
         c.execute("""
-            INSERT INTO scans (scan_time, month_key, total_symbols, scanned_ok, candidates, market_regime)
+            INSERT INTO scans (
+                scan_time,
+                month_key,
+                total_symbols,
+                scanned_ok,
+                candidates,
+                market_regime
+            )
             VALUES (?, ?, ?, ?, ?, ?)
         """, (
             datetime.now(TZ).isoformat(),
@@ -573,11 +740,21 @@ def scan_market(chat_id=None):
             len(candidates),
             regime_text
         ))
+
         c.commit()
         c.close()
 
-        telegram_long("\n".join(lines), chat_id or TELEGRAM_CHAT_ID)
+        # ============================================================
+        # TELEGRAM GÖNDER
+        # ============================================================
+
+        telegram_long(
+            "\n".join(lines),
+            chat_id or TELEGRAM_CHAT_ID
+        )
+
         log.info("✅ Tarama başarıyla bitti.")
+
     finally:
         scan_lock.release()
 
