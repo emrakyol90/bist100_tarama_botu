@@ -606,7 +606,7 @@ def scan_market(chat_id=None):
                     scanned_ok += 1
 
                 # Hangi aşamada elendi?
-               if reason == "EMA200":
+                if reason == "EMA200":
                     count_ema200 += 1
                 
                 elif reason == "WT":
