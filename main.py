@@ -596,6 +596,7 @@ def scan_market(chat_id=None):
         count_tech = 0
         count_fund = 0
         count_plan = 0
+        count_tech_data = 0
 
         for symbol in symbols:
             try:
@@ -605,21 +606,23 @@ def scan_market(chat_id=None):
                     scanned_ok += 1
 
                 # Hangi aşamada elendi?
-                if reason == "EMA200":
+               if reason == "EMA200":
                     count_ema200 += 1
-
+                
                 elif reason == "WT":
                     count_wt += 1
-
+                
+                elif reason == "TECH":
+                    count_tech_data += 1
+                
                 elif reason == "TECH_SCORE":
                     count_tech += 1
-
+                
                 elif reason == "FUND":
                     count_fund += 1
-
+                
                 elif reason == "PLAN":
                     count_plan += 1
-
                 elif reason == "SIGNAL":
                     candidates.append(res)
 
@@ -672,6 +675,7 @@ def scan_market(chat_id=None):
 
             f"❌ EMA200 altında: {count_ema200}",
             f"❌ WT şartı: {count_wt}",
+            f"❌ Teknik veri yetersiz: {count_tech_data}",
             f"❌ Teknik puan: {count_tech}",
             f"❌ Temel puan: {count_fund}",
             f"❌ Hedef / RR: {count_plan}",
