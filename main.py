@@ -319,14 +319,14 @@ def technical_analysis(daily, four_hour):
     for i in range(1, lookback + 1):
         x_candle = h.iloc[-i]
         p_candle = h.iloc[-i-1]
-        if (x_candle["wt1"] < 20 and x_candle["wt2"] < 20) and (p_candle["wt1"] <= p_candle["wt2"] and x_candle["wt1"] > x_candle["wt2"]) and (x_candle["close"] >= x_candle["open"]):
+        if (x_candle["wt1"] < 25 and x_candle["wt2"] < 25) and (p_candle["wt1"] <= p_candle["wt2"] and x_candle["wt1"] > x_candle["wt2"]) and (x_candle["close"] >= x_candle["open"]):
             wt_signal = True
             break
 
     score = ((20 if a["close"] > a["ema200"] else 0) + 
              (10 if a["ema200"] > old["ema200"] else 0) +
              (10 if a["ema20"] > a["ema50"] else 0) + 
-             (20 if wt_signal else 0) + 
+             (25 if wt_signal else 0) + 
              (10 if a["volume"] >= d["volume"].rolling(20).mean().iloc[-1] * 0.80 else 0))
 
     return {"technical_score": int(score), "close": float(a["close"]), "ema200": float(a["ema200"]), "atr": float(a["atr"]), "wt_signal": bool(wt_signal)}
@@ -457,7 +457,10 @@ def save_signal(x):
     
 
 def analyze_symbol(symbol):
-    # Açık sinyal kontrolü
+    # ============================================================
+    # AÇIK SİNYAL KONTROLÜ
+    # ============================================================
+
     c = get_db()
     open_sig = c.execute(
         "SELECT id FROM signals WHERE symbol=? AND status='OPEN'",
@@ -468,18 +471,158 @@ def analyze_symbol(symbol):
     if open_sig:
         return None, False, "OPEN"
 
+    # ============================================================
+    # VERİLERİ AL
+    # ============================================================
+
     daily = get_history(symbol, "2y", "1d")
+
     if daily.empty:
         return None, False, "DATA"
 
     hourly = get_history(symbol, "60d", "1h")
+
     if hourly.empty:
         return None, False, "DATA"
 
-    tech = technical_analysis(daily, to_4h(hourly))
+    four_hour = to_4h(hourly)
+
+    # ============================================================
+    # NORMAL TEKNİK ANALİZ
+    # ============================================================
+
+    tech = technical_analysis(daily, four_hour)
+
+    # ============================================================
+    # ÖZEL TARAMA
+    #
+    # Teknik analiz için 200 günlük / 40 adet 4H veri yetmiyorsa
+    # hisseyi çöpe atmıyoruz.
+    #
+    # Eldeki günlük veriden:
+    # - EMA20
+    # - EMA50
+    # - ATR
+    # - Hacim
+    #
+    # hesaplanıyor.
+    #
+    # Ayrıca temel analiz yapılıyor.
+    #
+    # Böylece bu hisselere de:
+    # GİRİŞ / TP / STOP / RR
+    # çıkarıyoruz.
+    # ============================================================
 
     if not tech:
-        return None, True, "TECH"
+
+        # En azından makul miktarda günlük veri olsun.
+        if len(daily) < 50:
+            return None, True, "TECH"
+
+        d = daily.copy()
+
+        d["ema20"] = ema(d["close"], 20)
+        d["ema50"] = ema(d["close"], 50)
+        d["atr"] = atr(d)
+
+        last = d.iloc[-1]
+
+        entry = float(last["close"])
+        atr_value = float(last["atr"])
+
+        if entry <= 0 or atr_value <= 0:
+            return None, True, "TECH"
+
+        # --------------------------------------------------------
+        # ÖZEL TEKNİK PUAN
+        # Maksimum 40 puan
+        # --------------------------------------------------------
+
+        special_technical = 0
+
+        # Fiyat EMA20 üstünde
+        if entry > float(last["ema20"]):
+            special_technical += 10
+
+        # EMA20 > EMA50
+        if float(last["ema20"]) > float(last["ema50"]):
+            special_technical += 10
+
+        # Hacim
+        avg_volume = d["volume"].rolling(20).mean().iloc[-1]
+
+        if pd.notna(avg_volume) and avg_volume > 0:
+            if float(last["volume"]) >= float(avg_volume) * 0.80:
+                special_technical += 10
+
+        # Son kapanış pozitif
+        if float(last["close"]) >= float(last["open"]):
+            special_technical += 10
+
+        # --------------------------------------------------------
+        # TEMEL ANALİZ
+        # --------------------------------------------------------
+
+        fund = fundamental_score(symbol)
+
+        # Temel puan çok zayıfsa özel aday olmasın.
+        if fund < 5:
+            return None, True, "TECH"
+
+        # --------------------------------------------------------
+        # ÖZEL TOPLAM PUAN
+        # --------------------------------------------------------
+
+        score = special_technical + fund
+
+        # En az 35 puan isteyelim.
+        # Böylece her veri yetersiz hisse özel aday olmaz.
+        if score < 35:
+            return None, True, "SPECIAL_SCORE"
+
+        # --------------------------------------------------------
+        # GİRİŞ / STOP / TP
+        # --------------------------------------------------------
+
+        risk_distance = max(
+            atr_value * 1.5,
+            entry * 0.01
+        )
+
+        stop = entry - risk_distance
+
+        if stop <= 0:
+            return None, True, "PLAN"
+
+        target = max(
+            entry * (1 + MIN_TARGET_PCT / 100.0),
+            entry + risk_distance * MIN_RR
+        )
+
+        target_pct = (target / entry - 1) * 100
+        rr = (target - entry) / risk_distance
+
+        if target_pct < MIN_TARGET_PCT or rr < MIN_RR:
+            return None, True, "PLAN"
+
+        return {
+            "symbol": symbol,
+            "score": int(score),
+            "technical_score": int(special_technical),
+            "fundamental_score": int(fund),
+            "entry": entry,
+            "target": target,
+            "stop": stop,
+            "target_pct": target_pct,
+            "rr": rr,
+            "daily_data": len(daily),
+            "four_hour_data": len(four_hour)
+        }, True, "SPECIAL_SIGNAL"
+
+    # ============================================================
+    # NORMAL STRATEJİ
+    # ============================================================
 
     # EMA200 filtresi
     if tech["close"] <= tech["ema200"]:
@@ -490,9 +633,10 @@ def analyze_symbol(symbol):
         return None, True, "WT"
 
     # Teknik skor filtresi
-    if tech["technical_score"] < 50:
+    if tech["technical_score"] < 45:
         return None, True, "TECH_SCORE"
 
+    # Temel analiz
     fund = fundamental_score(symbol)
 
     # Temel skor filtresi
@@ -501,9 +645,9 @@ def analyze_symbol(symbol):
 
     score = tech["technical_score"] + fund
 
+    # İşlem planı
     plan = trade_plan(tech)
 
-    # Hedef / RR filtresi
     if not plan:
         return None, True, "PLAN"
 
@@ -514,7 +658,6 @@ def analyze_symbol(symbol):
         "fundamental_score": fund,
         **plan
     }, True, "SIGNAL"
-
 def generate_monthly_report(mode="all", current_m_key=None):
     c = get_db()
 
@@ -572,23 +715,31 @@ def generate_monthly_report(mode="all", current_m_key=None):
 def scan_market(chat_id=None):
     if not scan_lock.acquire(blocking=False):
         if chat_id:
-            telegram_send("⚠️ Taramada zaten aktif bir işlem yürütülüyor.", chat_id)
+            telegram_send(
+                "⚠️ Taramada zaten aktif bir işlem yürütülüyor.",
+                chat_id
+            )
         return
 
     try:
         log.info("🔍 Tarama süreci başlatıldı...")
 
         if chat_id:
-            telegram_send("🔍 Tarama başlatıldı, piyasa taranıyor...", chat_id)
+            telegram_send(
+                "🔍 Tarama başlatıldı, piyasa taranıyor...",
+                chat_id
+            )
 
         symbols = get_all_symbols()
         market = market_regime()
 
         candidates = []
+        special_candidates = []
+
         scanned_ok = 0
 
         # ============================================================
-        # FİLTRE ELEME SAYAÇLARI
+        # FİLTRE SAYAÇLARI
         # ============================================================
 
         count_ema200 = 0
@@ -597,40 +748,56 @@ def scan_market(chat_id=None):
         count_fund = 0
         count_plan = 0
         count_tech_data = 0
+        count_special_score = 0
+
+        # ============================================================
+        # TÜM HİSSELERİ TARA
+        # ============================================================
 
         for symbol in symbols:
+
             try:
+
                 res, ok, reason = analyze_symbol(symbol)
 
                 if ok:
                     scanned_ok += 1
 
-                # Hangi aşamada elendi?
                 if reason == "EMA200":
                     count_ema200 += 1
-                
+
                 elif reason == "WT":
                     count_wt += 1
-                
+
                 elif reason == "TECH":
                     count_tech_data += 1
-                
+
+                elif reason == "SPECIAL_SCORE":
+                    count_tech_data += 1
+                    count_special_score += 1
+
+                elif reason == "SPECIAL_SIGNAL":
+                    special_candidates.append(res)
+
                 elif reason == "TECH_SCORE":
                     count_tech += 1
-                
+
                 elif reason == "FUND":
                     count_fund += 1
-                
+
                 elif reason == "PLAN":
                     count_plan += 1
+
                 elif reason == "SIGNAL":
                     candidates.append(res)
 
             except Exception as e:
-                log.error(f"Analiz hatası ({symbol}): {e}")
+                log.error(
+                    f"Analiz hatası ({symbol}): {e}"
+                )
 
         # ============================================================
-        # ADAYLARI SIRALA VE KAYDET
+        # NORMAL SİNYALLERİ SIRALA
         # ============================================================
 
         candidates.sort(
@@ -642,8 +809,31 @@ def scan_market(chat_id=None):
             reverse=True
         )
 
+        # ============================================================
+        # ÖZEL SİNYALLERİ SIRALA
+        # ============================================================
+
+        special_candidates.sort(
+            key=lambda x: (
+                x["score"],
+                x["target_pct"],
+                x["rr"]
+            ),
+            reverse=True
+        )
+
+        # ============================================================
+        # NORMAL + ÖZEL SİNYALLER DB'YE KAYDEDİLİR
+
         for candidate in candidates:
             save_signal(candidate)
+
+        for candidate in special_candidates:
+            save_signal(candidate)
+
+        # ============================================================
+        # MARKET BİLGİSİ
+        # ============================================================
 
         xu100_val = (
             f"{market['value']:.2f}"
@@ -652,6 +842,7 @@ def scan_market(chat_id=None):
         )
 
         regime_text = market["regime"]
+
         total_symbols_count = len(symbols)
 
         # ============================================================
@@ -659,44 +850,59 @@ def scan_market(chat_id=None):
         # ============================================================
 
         lines = [
+
             f"🔍 BIST TARAMA RAPORU - "
             f"{datetime.now(TZ).strftime('%d.%m.%Y %H:%M')}",
 
             "━━━━━━━━━━━━━━━━━━",
 
             f"📈 BIST 100 Endeks: {xu100_val}",
+
             f"🚦 Piyasa Trendi: {regime_text}",
+
             f"📊 Taranan Hisse Sayısı: "
-            f"{total_symbols_count} (Başarılı: {scanned_ok})",
+            f"{total_symbols_count} "
+            f"(Başarılı: {scanned_ok})",
 
             "━━━━━━━━━━━━━━━━━━",
 
             "🔎 FİLTRE ELEME RAPORU:",
 
             f"❌ EMA200 altında: {count_ema200}",
+
             f"❌ WT şartı: {count_wt}",
-            f"❌ Teknik veri yetersiz: {count_tech_data}",
+
+            f"⚠️ Teknik veri yetersiz: "
+            f"{count_tech_data}",
+
             f"❌ Teknik puan: {count_tech}",
+
             f"❌ Temel puan: {count_fund}",
+
             f"❌ Hedef / RR: {count_plan}",
 
-            f"🎯 Final uygun: {len(candidates)}",
+            "━━━━━━━━━━━━━━━━━━",
+
+            f"🎯 NORMAL SİNYAL: "
+            f"{len(candidates)}",
+
+            f"🔎 ÖZEL TARAMA SİNYALİ: "
+            f"{len(special_candidates)}",
 
             "━━━━━━━━━━━━━━━━━━"
         ]
 
-        if not candidates:
+        # ============================================================
+        # NORMAL SİNYALLER
+        # ============================================================
+
+        if candidates:
 
             lines.append(
-                "❌ Stratejiye uygun hisse bulunamadı."
+                "🎯 NORMAL STRATEJİ SİNYALLERİ:"
             )
 
-        else:
-
-            lines.append(
-                f"🎯 Bulunan Sinyal Sayısı: "
-                f"{len(candidates)}\n"
-            )
+            lines.append("")
 
             for x in candidates:
 
@@ -713,12 +919,101 @@ def scan_market(chat_id=None):
                 )
 
                 lines.append(
+
                     f"📌 {x['symbol']} - "
                     f"{puan} Puan [{seviye}]\n"
-                    f"Giriş: {x['entry']:.2f} | "
-                    f"Hedef: {x['target']:.2f} | "
-                    f"Stop: {x['stop']:.2f}\n"
+
+                    f"📊 Teknik: "
+                    f"{x['technical_score']} | "
+                    f"Temel: "
+                    f"{x['fundamental_score']}\n"
+
+                    f"💰 Giriş: "
+                    f"{x['entry']:.2f}\n"
+
+                    f"🎯 TP: "
+                    f"{x['target']:.2f} "
+                    f"(+%{x['target_pct']:.2f})\n"
+
+                    f"🛑 Stop: "
+                    f"{x['stop']:.2f}\n"
+
+                    f"⚖️ RR: "
+                    f"{x['rr']:.2f}\n"
+
+                    "━━━━━━━━━━━━━━━━━━"
                 )
+
+        else:
+
+            lines.append(
+                "❌ Normal stratejiye uygun "
+                "hisse bulunamadı."
+            )
+
+        # ============================================================
+        # ÖZEL TARAMA SİNYALLERİ
+        # ============================================================
+
+        if special_candidates:
+
+            lines.append("")
+
+            lines.append(
+                "🔎 ÖZEL TARAMA — "
+                "VERİSİ YETERSİZ HİSSELER:"
+            )
+
+            lines.append(
+                "⚠️ Bu hisseler normal "
+                "200G + 4H teknik filtresinden "
+                "geçmedi."
+            )
+
+            lines.append("")
+
+            for x in special_candidates:
+
+                puan = x["score"]
+
+                lines.append(
+
+                    f"🔍 {x['symbol']} - "
+                    f"{puan} Puan\n"
+
+                    f"📊 Özel Teknik: "
+                    f"{x['technical_score']} | "
+                    f"Temel: "
+                    f"{x['fundamental_score']}\n"
+
+                    f"📚 Veri: "
+                    f"{x['daily_data']} günlük | "
+                    f"{x['four_hour_data']} adet 4H\n"
+
+                    f"💰 Giriş: "
+                    f"{x['entry']:.2f}\n"
+
+                    f"🎯 TP: "
+                    f"{x['target']:.2f} "
+                    f"(+%{x['target_pct']:.2f})\n"
+
+                    f"🛑 Stop: "
+                    f"{x['stop']:.2f}\n"
+
+                    f"⚖️ RR: "
+                    f"{x['rr']:.2f}\n"
+
+                    "━━━━━━━━━━━━━━━━━━"
+                )
+
+        else:
+
+            lines.append("")
+
+            lines.append(
+                "🔎 Özel taramada da "
+                "uygun aday bulunamadı."
+            )
 
         # ============================================================
         # TARAMA KAYDI
@@ -737,11 +1032,17 @@ def scan_market(chat_id=None):
             )
             VALUES (?, ?, ?, ?, ?, ?)
         """, (
+
             datetime.now(TZ).isoformat(),
+
             month_key(),
+
             total_symbols_count,
+
             scanned_ok,
+
             len(candidates),
+
             regime_text
         ))
 
@@ -749,7 +1050,7 @@ def scan_market(chat_id=None):
         c.close()
 
         # ============================================================
-        # TELEGRAM GÖNDER
+        # TELEGRAM
         # ============================================================
 
         telegram_long(
@@ -757,9 +1058,14 @@ def scan_market(chat_id=None):
             chat_id or TELEGRAM_CHAT_ID
         )
 
-        log.info("✅ Tarama başarıyla bitti.")
+        log.info(
+            f"✅ Tarama bitti. "
+            f"Normal: {len(candidates)} | "
+            f"Özel: {len(special_candidates)}"
+        )
 
     finally:
+
         scan_lock.release()
 
 # ============================================================
