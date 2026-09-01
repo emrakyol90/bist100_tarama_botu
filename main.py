@@ -478,12 +478,12 @@ def analyze_symbol(symbol):
     daily = get_history(symbol, "2y", "1d")
 
     if daily.empty:
-        return None, False, "DATA"
+        return None, False, "DATA_DAILY"
 
     hourly = get_history(symbol, "60d", "1h")
 
     if hourly.empty:
-        return None, False, "DATA"
+        return None, False, "DATA_HOURLY"
 
     four_hour = to_4h(hourly)
 
@@ -515,111 +515,89 @@ def analyze_symbol(symbol):
     # ============================================================
 
     if not tech:
-
-        # En azından makul miktarda günlük veri olsun.
-        if len(daily) < 50:
-            return None, True, "TECH"
-
-        d = daily.copy()
-
-        d["ema20"] = ema(d["close"], 20)
-        d["ema50"] = ema(d["close"], 50)
-        d["atr"] = atr(d)
-
-        last = d.iloc[-1]
-
-        entry = float(last["close"])
-        atr_value = float(last["atr"])
-
-        if entry <= 0 or atr_value <= 0:
-            return None, True, "TECH"
-
-        # --------------------------------------------------------
-        # ÖZEL TEKNİK PUAN
-        # Maksimum 40 puan
-        # --------------------------------------------------------
-
-        special_technical = 0
-
-        # Fiyat EMA20 üstünde
-        if entry > float(last["ema20"]):
-            special_technical += 10
-
-        # EMA20 > EMA50
-        if float(last["ema20"]) > float(last["ema50"]):
-            special_technical += 10
-
-        # Hacim
-        avg_volume = d["volume"].rolling(20).mean().iloc[-1]
-
-        if pd.notna(avg_volume) and avg_volume > 0:
-            if float(last["volume"]) >= float(avg_volume) * 0.80:
-                special_technical += 10
-
-        # Son kapanış pozitif
-        if float(last["close"]) >= float(last["open"]):
-            special_technical += 10
-
-        # --------------------------------------------------------
-        # TEMEL ANALİZ
-        # --------------------------------------------------------
-
-        fund = fundamental_score(symbol)
-
-        # Temel puan çok zayıfsa özel aday olmasın.
-        if fund < 5:
-            return None, True, "TECH"
-
-        # --------------------------------------------------------
-        # ÖZEL TOPLAM PUAN
-        # --------------------------------------------------------
-
-        score = special_technical + fund
-
-        # En az 35 puan isteyelim.
-        # Böylece her veri yetersiz hisse özel aday olmaz.
-        if score < 35:
-            return None, True, "SPECIAL_SCORE"
-
-        # --------------------------------------------------------
-        # GİRİŞ / STOP / TP
-        # --------------------------------------------------------
-
-        risk_distance = max(
-            atr_value * 1.5,
-            entry * 0.01
+        log.info(
+            f"🔎 ÖZEL TARAMA: {symbol} | "
+            f"Günlük veri: {len(daily)} | "
+            f"4H veri: {len(four_hour)}"
         )
 
-        stop = entry - risk_distance
+    if len(daily) < 50:
+        return None, True, "SPECIAL_DAILY_DATA"
 
-        if stop <= 0:
-            return None, True, "PLAN"
+    d = daily.copy()
+    d["ema20"] = ema(d["close"], 20)
+    d["ema50"] = ema(d["close"], 50)
+    d["atr"] = atr(d)
+    last = d.iloc[-1]
 
-        target = max(
-            entry * (1 + MIN_TARGET_PCT / 100.0),
-            entry + risk_distance * MIN_RR
-        )
+    entry = float(last["close"])
+    atr_value = float(last["atr"])
 
-        target_pct = (target / entry - 1) * 100
-        rr = (target - entry) / risk_distance
+    if entry <= 0 or atr_value <= 0:
+        return None, True, "SPECIAL_PLAN"
 
-        if target_pct < MIN_TARGET_PCT or rr < MIN_RR:
-            return None, True, "PLAN"
+    special_technical = 0
 
-        return {
-            "symbol": symbol,
-            "score": int(score),
-            "technical_score": int(special_technical),
-            "fundamental_score": int(fund),
-            "entry": entry,
-            "target": target,
-            "stop": stop,
-            "target_pct": target_pct,
-            "rr": rr,
-            "daily_data": len(daily),
-            "four_hour_data": len(four_hour)
-        }, True, "SPECIAL_SIGNAL"
+    if entry > float(last["ema20"]):
+        special_technical += 10
 
+    if float(last["ema20"]) > float(last["ema50"]):
+        special_technical += 10
+
+    avg_volume = d["volume"].rolling(20).mean().iloc[-1]
+
+    if pd.notna(avg_volume) and avg_volume > 0:
+        if float(last["volume"]) >= float(avg_volume) * 0.80:
+            special_technical += 10
+
+    if float(last["close"]) >= float(last["open"]):
+        special_technical += 10
+
+    fund = fundamental_score(symbol)
+
+    if fund < 5:
+        return None, True, "SPECIAL_FUND"
+
+    score = special_technical + fund
+
+    if score < 35:
+        return None, True, "SPECIAL_SCORE"
+
+    risk_distance = max(
+        atr_value * 1.5,
+        entry * 0.01
+    )
+
+    stop = entry - risk_distance
+
+    if stop <= 0:
+        return None, True, "SPECIAL_PLAN"
+
+    target = max(
+        entry * (1 + MIN_TARGET_PCT / 100.0),
+        entry + risk_distance * MIN_RR
+    )
+
+    target_pct = (target / entry - 1) * 100
+    rr = (target - entry) / risk_distance
+
+    if target_pct < MIN_TARGET_PCT or rr < MIN_RR:
+        return None, True, "SPECIAL_PLAN"
+
+    return {
+        
+        "symbol": symbol,
+        "score": int(score),
+        "technical_score": int(special_technical),
+        "fundamental_score": int(fund),
+        "entry": entry,
+        "target": target,
+        "stop": stop,
+        "target_pct": target_pct,
+        "rr": rr,
+        "daily_data": len(daily),
+        "four_hour_data": len(four_hour)
+    }, True, "SPECIAL_SIGNAL"
     # ============================================================
     # NORMAL STRATEJİ
     # ============================================================
@@ -747,9 +725,15 @@ def scan_market(chat_id=None):
         count_tech = 0
         count_fund = 0
         count_plan = 0
-        count_tech_data = 0
+        
+        # ÖZEL TARAMA ELEME SAYAÇLARI
+        count_special_daily = 0
+        count_special_fund = 0
         count_special_score = 0
+        count_special_plan = 0
 
+        # VERİ ALAMAYAN HİSSELER
+        count_data = 0
         # ============================================================
         # TÜM HİSSELERİ TARA
         # ============================================================
@@ -765,29 +749,37 @@ def scan_market(chat_id=None):
 
                 if reason == "EMA200":
                     count_ema200 += 1
-
+                
                 elif reason == "WT":
                     count_wt += 1
-
-                elif reason == "TECH":
-                    count_tech_data += 1
-
-                elif reason == "SPECIAL_SCORE":
-                    count_tech_data += 1
-                    count_special_score += 1
-
-                elif reason == "SPECIAL_SIGNAL":
-                    special_candidates.append(res)
-
+                
                 elif reason == "TECH_SCORE":
                     count_tech += 1
-
+                
                 elif reason == "FUND":
                     count_fund += 1
-
+                
                 elif reason == "PLAN":
                     count_plan += 1
-
+                
+                elif reason == "SPECIAL_DAILY_DATA":
+                    count_special_daily += 1
+                
+                elif reason == "SPECIAL_FUND":
+                    count_special_fund += 1
+                
+                elif reason == "SPECIAL_SCORE":
+                    count_special_score += 1
+                
+                elif reason == "SPECIAL_PLAN":
+                    count_special_plan += 1
+                
+                elif reason == "SPECIAL_SIGNAL":
+                    special_candidates.append(res)
+                
+                elif reason in ("DATA_DAILY", "DATA_HOURLY"):
+                    count_data += 1
+                
                 elif reason == "SIGNAL":
                     candidates.append(res)
 
@@ -867,20 +859,18 @@ def scan_market(chat_id=None):
             "━━━━━━━━━━━━━━━━━━",
 
             "🔎 FİLTRE ELEME RAPORU:",
-
             f"❌ EMA200 altında: {count_ema200}",
-
             f"❌ WT şartı: {count_wt}",
-
-            f"⚠️ Teknik veri yetersiz: "
-            f"{count_tech_data}",
-
             f"❌ Teknik puan: {count_tech}",
-
             f"❌ Temel puan: {count_fund}",
-
             f"❌ Hedef / RR: {count_plan}",
-
+            
+            "🔎 ÖZEL TARAMA ELEME:",
+            f"⚠️ Günlük veri <50: {count_special_daily}",
+            f"❌ Temel puan <5: {count_special_fund}",
+            f"❌ Özel toplam puan <35: {count_special_score}",
+            f"❌ Özel Hedef / RR: {count_special_plan}",
+            f"⚠️ Veri alınamadı: {count_data}",
             "━━━━━━━━━━━━━━━━━━",
 
             f"🎯 NORMAL SİNYAL: "
