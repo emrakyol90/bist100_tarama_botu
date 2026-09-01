@@ -521,109 +521,104 @@ def analyze_symbol(symbol):
             f"4H veri: {len(four_hour)}"
         )
 
-    if len(daily) < 50:
-        return None, True, "SPECIAL_DAILY_DATA"
+        if len(daily) < 50:
+            return None, True, "SPECIAL_DAILY_DATA"
 
-    d = daily.copy()
-    d["ema20"] = ema(d["close"], 20)
-    d["ema50"] = ema(d["close"], 50)
-    d["atr"] = atr(d)
-    last = d.iloc[-1]
+        d = daily.copy()
+        d["ema20"] = ema(d["close"], 20)
+        d["ema50"] = ema(d["close"], 50)
+        d["atr"] = atr(d)
 
-    entry = float(last["close"])
-    atr_value = float(last["atr"])
+        last = d.iloc[-1]
 
-    if entry <= 0 or atr_value <= 0:
-        return None, True, "SPECIAL_PLAN"
+        entry = float(last["close"])
+        atr_value = float(last["atr"])
 
-    special_technical = 0
+        if entry <= 0 or atr_value <= 0:
+            return None, True, "SPECIAL_PLAN"
 
-    if entry > float(last["ema20"]):
-        special_technical += 10
+        special_technical = 0
 
-    if float(last["ema20"]) > float(last["ema50"]):
-        special_technical += 10
-
-    avg_volume = d["volume"].rolling(20).mean().iloc[-1]
-
-    if pd.notna(avg_volume) and avg_volume > 0:
-        if float(last["volume"]) >= float(avg_volume) * 0.80:
+        if entry > float(last["ema20"]):
             special_technical += 10
 
-    if float(last["close"]) >= float(last["open"]):
-        special_technical += 10
+        if float(last["ema20"]) > float(last["ema50"]):
+            special_technical += 10
 
-    fund = fundamental_score(symbol)
+        avg_volume = d["volume"].rolling(20).mean().iloc[-1]
 
-    if fund < 5:
-        return None, True, "SPECIAL_FUND"
+        if pd.notna(avg_volume) and avg_volume > 0:
+            if float(last["volume"]) >= float(avg_volume) * 0.80:
+                special_technical += 10
 
-    score = special_technical + fund
+        if float(last["close"]) >= float(last["open"]):
+            special_technical += 10
 
-    if score < 35:
-        return None, True, "SPECIAL_SCORE"
+        fund = fundamental_score(symbol)
 
-    risk_distance = max(
-        atr_value * 1.5,
-        entry * 0.01
-    )
+        if fund < 5:
+            return None, True, "SPECIAL_FUND"
 
-    stop = entry - risk_distance
+        score = special_technical + fund
 
-    if stop <= 0:
-        return None, True, "SPECIAL_PLAN"
+        if score < 35:
+            return None, True, "SPECIAL_SCORE"
 
-    target = max(
-        entry * (1 + MIN_TARGET_PCT / 100.0),
-        entry + risk_distance * MIN_RR
-    )
+        risk_distance = max(
+            atr_value * 1.5,
+            entry * 0.01
+        )
 
-    target_pct = (target / entry - 1) * 100
-    rr = (target - entry) / risk_distance
+        stop = entry - risk_distance
 
-    if target_pct < MIN_TARGET_PCT or rr < MIN_RR:
-        return None, True, "SPECIAL_PLAN"
+        if stop <= 0:
+            return None, True, "SPECIAL_PLAN"
 
-    return {
-        
-        "symbol": symbol,
-        "score": int(score),
-        "technical_score": int(special_technical),
-        "fundamental_score": int(fund),
-        "entry": entry,
-        "target": target,
-        "stop": stop,
-        "target_pct": target_pct,
-        "rr": rr,
-        "daily_data": len(daily),
-        "four_hour_data": len(four_hour)
-    }, True, "SPECIAL_SIGNAL"
+        target = max(
+            entry * (1 + MIN_TARGET_PCT / 100.0),
+            entry + risk_distance * MIN_RR
+        )
+
+        target_pct = (target / entry - 1) * 100
+        rr = (target - entry) / risk_distance
+
+        if target_pct < MIN_TARGET_PCT or rr < MIN_RR:
+            return None, True, "SPECIAL_PLAN"
+
+        return {
+            "symbol": symbol,
+            "score": int(score),
+            "technical_score": int(special_technical),
+            "fundamental_score": int(fund),
+            "entry": entry,
+            "target": target,
+            "stop": stop,
+            "target_pct": target_pct,
+            "rr": rr,
+            "daily_data": len(daily),
+            "four_hour_data": len(four_hour)
+        }, True, "SPECIAL_SIGNAL"
+
     # ============================================================
     # NORMAL STRATEJİ
     # ============================================================
 
-    # EMA200 filtresi
     if tech["close"] <= tech["ema200"]:
         return None, True, "EMA200"
 
-    # WT filtresi
     if not tech["wt_signal"]:
         return None, True, "WT"
 
-    # Teknik skor filtresi
     if tech["technical_score"] < 45:
         return None, True, "TECH_SCORE"
 
-    # Temel analiz
     fund = fundamental_score(symbol)
 
-    # Temel skor filtresi
     if fund < 5:
         return None, True, "FUND"
 
     score = tech["technical_score"] + fund
 
-    # İşlem planı
     plan = trade_plan(tech)
 
     if not plan:
