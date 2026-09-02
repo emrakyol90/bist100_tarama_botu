@@ -199,55 +199,72 @@ def normalize_symbol(s):
     return s if s else None
 
 def get_all_symbols():
+    # Borsa Yatırım Fonları (ETF) ve İstenmeyen Semboller
+    ETF_BLACKLIST = {
+        "USDTR", "GLDTR", "GMSTR", "ZGOLD", "ZREIT", "Z30EA", 
+        "ZSERA", "ZUSL1", "ZKB10", "FBABA", "IST30"
+    }
+
+    fetched = []
+
     env = os.getenv("BIST_SYMBOLS", "").strip()
     if env:
-        return sorted(set(normalize_symbol(x) for x in env.split(",") if normalize_symbol(x)))
+        fetched = [normalize_symbol(x) for x in env.split(",") if normalize_symbol(x)]
 
     # 1. DENEME: İş Yatırım
-    try:
-        url = "https://www.isyatirim.com.tr/_layouts/15/IsYatirim.MusteriKanali/CommonData.aspx/GetHisseList"
-        r = requests.get(url, headers={"User-Agent": "Mozilla/5.0"}, timeout=10)
-        if r.ok:
-            fetched = [item["code"] for item in r.json() if "code" in item and item["code"]]
-            if len(fetched) >= 300:
-                log.info(f"✅ İş Yatırım üzerinden {len(fetched)} hisse otomatik çekildi.")
-                return sorted(set(fetched))
-    except Exception as e:
-        log.warning(f"⚠️ İş Yatırım dinamik liste çekilemedi: {e}")
+    if not fetched:
+        try:
+            url = "https://www.isyatirim.com.tr/_layouts/15/IsYatirim.MusteriKanali/CommonData.aspx/GetHisseList"
+            r = requests.get(url, headers={"User-Agent": "Mozilla/5.0"}, timeout=10)
+            if r.ok:
+                data = [item["code"] for item in r.json() if "code" in item and item["code"]]
+                if len(data) >= 300:
+                    log.info(f"✅ İş Yatırım üzerinden {len(data)} hisse otomatik çekildi.")
+                    fetched = data
+        except Exception as e:
+            log.warning(f"⚠️ İş Yatırım dinamik liste çekilemedi: {e}")
 
     # 2. DENEME: TradingView BIST Taraması
-    try:
-        tv_url = "https://scanner.tradingview.com/turkey/scan"
-        payload = {
-            "filter": [{"left": "type", "operation": "in_range", "right": ["stock", "dr", "fund"]}],
-            "symbols": {"query": {"types": []}},
-            "columns": ["name"],
-            "range": [0, 1000]
-        }
-        r = requests.post(tv_url, json=payload, headers={"User-Agent": "Mozilla/5.0"}, timeout=10)
-        if r.ok:
-            data = r.json().get("data", [])
-            fetched = [item["s"].split(":")[-1] for item in data if "s" in item]
-            if len(fetched) >= 300:
-                log.info(f"✅ TradingView üzerinden {len(fetched)} hisse otomatik çekildi.")
-                return sorted(set(fetched))
-    except Exception as e:
-        log.warning(f"⚠️ TradingView üzerinden liste çekilemedi: {e}")
+    if not fetched:
+        try:
+            tv_url = "https://scanner.tradingview.com/turkey/scan"
+            payload = {
+                "filter": [{"left": "type", "operation": "in_range", "right": ["stock", "dr", "fund"]}],
+                "symbols": {"query": {"types": []}},
+                "columns": ["name"],
+                "range": [0, 1000]
+            }
+            r = requests.post(tv_url, json=payload, headers={"User-Agent": "Mozilla/5.0"}, timeout=10)
+            if r.ok:
+                data = r.json().get("data", [])
+                tv_fetched = [item["s"].split(":")[-1] for item in data if "s" in item]
+                if len(tv_fetched) >= 300:
+                    log.info(f"✅ TradingView üzerinden {len(tv_fetched)} hisse otomatik çekildi.")
+                    fetched = tv_fetched
+        except Exception as e:
+            log.warning(f"⚠️ TradingView üzerinden liste çekilemedi: {e}")
 
     # 3. DENEME: Güncel Açık Kaynak JSON
-    try:
-        gh_url = "https://raw.githubusercontent.com/fawazahmed0/currency-api/1/bist.json"
-        r = requests.get(gh_url, timeout=10)
-        if r.ok:
-            fetched = r.json()
-            if isinstance(fetched, list) and len(fetched) >= 300:
-                log.info(f"✅ Açık kaynak yedek listeden {len(fetched)} hisse çekildi.")
-                return sorted(set(fetched))
-    except Exception as e:
-        log.warning(f"⚠️ Açık kaynak yedek listeden çekilemedi: {e}")
+    if not fetched:
+        try:
+            gh_url = "https://raw.githubusercontent.com/fawazahmed0/currency-api/1/bist.json"
+            r = requests.get(gh_url, timeout=10)
+            if r.ok:
+                data = r.json()
+                if isinstance(data, list) and len(data) >= 300:
+                    log.info(f"✅ Açık kaynak yedek listeden {len(data)} hisse çekildi.")
+                    fetched = data
+        except Exception as e:
+            log.warning(f"⚠️ Açık kaynak yedek listeden çekilemedi: {e}")
 
-    log.error("❌ Otomatik listelerin hiçbiri çekilemedi, acil durum yedeği kullanılıyor!")
-    return sorted(set(FALLBACK_SYMBOLS))
+    if not fetched:
+        log.error("❌ Otomatik listelerin hiçbiri çekilemedi, acil durum yedeği kullanılıyor!")
+        fetched = FALLBACK_SYMBOLS
+
+    # Çekilen listeden fonları ve kara listedekileri temizle
+    clean_symbols = [s for s in fetched if s not in ETF_BLACKLIST]
+
+    return sorted(set(clean_symbols))
 
 def yahoo_symbol(symbol):
     if symbol in ("^XU100", "XU100.IS", "^GSPC", "^IXIC"):
@@ -315,7 +332,7 @@ def technical_analysis(daily, four_hour):
 
     # Son 6 mum (gün içindeki 24 saat) kontrolü
     wt_signal = False
-    lookback = min(6, len(h) - 1)
+    lookback = min(10, len(h) - 1)
     for i in range(1, lookback + 1):
         x_candle = h.iloc[-i]
         p_candle = h.iloc[-i-1]
@@ -606,7 +623,7 @@ def analyze_symbol(symbol):
     if not tech["wt_signal"]:
         return None, True, "WT"
 
-    if tech["technical_score"] < 45:
+    if tech["technical_score"] < 40:
         return None, True, "TECH_SCORE"
 
     fund = fundamental_score(symbol)
