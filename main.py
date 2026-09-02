@@ -521,16 +521,15 @@ def analyze_symbol(symbol):
             f"4H veri: {len(four_hour)}"
         )
 
-        if len(daily) < 50:
+        # 1. ESNETME: 50 gün şartını 20 güne çektik
+        if len(daily) < 20:
             return None, True, "SPECIAL_DAILY_DATA"
 
         d = daily.copy()
         d["ema20"] = ema(d["close"], 20)
-        d["ema50"] = ema(d["close"], 50)
         d["atr"] = atr(d)
 
         last = d.iloc[-1]
-
         entry = float(last["close"])
         atr_value = float(last["atr"])
 
@@ -539,29 +538,27 @@ def analyze_symbol(symbol):
 
         special_technical = 0
 
+        # Fiyat EMA20 üstündeyse (+15 Puan)
         if entry > float(last["ema20"]):
-            special_technical += 10
+            special_technical += 15
 
-        if float(last["ema20"]) > float(last["ema50"]):
-            special_technical += 10
-
-        avg_volume = d["volume"].rolling(20).mean().iloc[-1]
-
-        if pd.notna(avg_volume) and avg_volume > 0:
-            if float(last["volume"]) >= float(avg_volume) * 0.80:
-                special_technical += 10
-
+        # Yeşil mum kapattıysa (+10 Puan)
         if float(last["close"]) >= float(last["open"]):
             special_technical += 10
 
-        fund = fundamental_score(symbol)
+        # Hacim kontrolü (+15 Puan)
+        avg_volume = d["volume"].rolling(20).mean().iloc[-1]
+        if pd.notna(avg_volume) and avg_volume > 0:
+            if float(last["volume"]) >= float(avg_volume) * 0.80:
+                special_technical += 15
 
-        if fund < 5:
-            return None, True, "SPECIAL_FUND"
+        # 2. ESNETME: Temel puanı alıyoruz ama 5'ten küçükse ELEMİYORUZ.
+        fund = fundamental_score(symbol)
 
         score = special_technical + fund
 
-        if score < 35:
+        # 3. ESNETME: Barajı 35'ten 25'e düşürdük
+        if score < 25:
             return None, True, "SPECIAL_SCORE"
 
         risk_distance = max(
@@ -863,7 +860,7 @@ def scan_market(chat_id=None):
             "🔎 ÖZEL TARAMA ELEME:",
             f"⚠️ Günlük veri <50: {count_special_daily}",
             f"❌ Temel puan <5: {count_special_fund}",
-            f"❌ Özel toplam puan <35: {count_special_score}",
+            f"❌ Özel toplam puan <25: {count_special_score}",
             f"❌ Özel Hedef / RR: {count_special_plan}",
             f"⚠️ Veri alınamadı: {count_data}",
             "━━━━━━━━━━━━━━━━━━",
